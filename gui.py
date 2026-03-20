@@ -60,7 +60,7 @@ class App(tk.Tk):
 
     # ────────────────── UI構築 ──────────────────────────────
     def _build_ui(self):
-        root_pad = dict(padx=16, pady=0)
+        root_pad = dict(padx=16)
 
         # ── ヘッダー（タイトルバー風）──
         hdr = tk.Frame(self, bg=CARD, pady=10)
