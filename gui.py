@@ -371,7 +371,7 @@ class App(ctk.CTk):
 
             # 原文（翻訳時のみ・薄グレー）
             if translated:
-                ctk.CTkLabel(right, text=original, text_color=FG3,
+                ctk.CTkLabel(right, text=original, text_color="#888888",
                              font=ctk.CTkFont("Yu Gothic UI",10), fg_color="transparent",
                              anchor="w", justify="left", wraplength=280).pack(fill="x")
 
