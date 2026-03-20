@@ -168,28 +168,33 @@ OVERLAY_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{background:transparent;font-family:'Meiryo','Noto Sans JP',sans-serif;overflow:hidden}
-  #messages{position:fixed;bottom:10px;left:10px;right:10px;display:flex;flex-direction:column-reverse;gap:4px;max-height:90vh;overflow:hidden}
-  .msg{background:rgba(0,0,0,0.72);border-radius:6px;padding:5px 10px;color:#fff;font-size:14px;line-height:1.5;animation:fadein 0.4s ease;word-break:break-word}
-  .msg.translated{border-left:3px solid #4af}
-  .msg.japanese{border-left:3px solid #888}
-  .author{color:#ffd700;font-weight:bold;font-size:12px}
-  .lang-badge{display:inline-block;font-size:10px;background:#4af;color:#000;border-radius:3px;padding:0 4px;margin-left:4px;vertical-align:middle}
-  .original{color:#aaa;font-size:12px;margin-top:1px}
-  @keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  #messages{position:fixed;bottom:16px;left:16px;right:16px;display:flex;flex-direction:column-reverse;gap:6px;max-height:90vh;overflow:hidden}
+  .msg{background:rgba(0,0,0,0.88);border-radius:8px;padding:8px 14px;color:#ffffff;font-size:18px;line-height:1.6;animation:fadein 0.35s ease;word-break:break-word;text-shadow:0 1px 3px rgba(0,0,0,0.8)}
+  .msg.translated{border-left:4px solid #29b6f6}
+  .msg.japanese{border-left:4px solid #555}
+  .meta{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+  .author{color:#ffe066;font-weight:bold;font-size:14px}
+  .lang-badge{font-size:11px;background:#29b6f6;color:#000;border-radius:4px;padding:1px 7px;font-weight:bold}
+  .translated-text{color:#ffffff;font-size:18px}
+  .original{color:#bbb;font-size:13px;margin-top:3px}
+  @keyframes fadein{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 </style></head><body>
 <div id="messages"></div>
 <script>
-let lastCount=-1;
+const maxShow=parseInt(new URLSearchParams(location.search).get('count')||'10',10);
+let lastKey='';
 async function poll(){
   try{
     const res=await fetch('/messages');
     const data=await res.json();
-    if(data.length!==lastCount){
-      lastCount=data.length;
-      document.getElementById('messages').innerHTML=data.map(m=>{
+    const show=data.slice(0,maxShow);
+    const key=show.map(m=>m.author+m.original).join('|');
+    if(key!==lastKey){
+      lastKey=key;
+      document.getElementById('messages').innerHTML=show.map(m=>{
         const a=esc(m.author),o=esc(m.original);
-        if(m.translated)return`<div class="msg translated"><span class="author">${a}</span><span class="lang-badge">${langName(m.lang)}</span><div>${esc(m.translated)}</div><div class="original">${o}</div></div>`;
-        return`<div class="msg japanese"><span class="author">${a}</span><div>${o}</div></div>`;
+        if(m.translated)return`<div class="msg translated"><div class="meta"><span class="author">${a}</span><span class="lang-badge">${langName(m.lang)}</span></div><div class="translated-text">${esc(m.translated)}</div><div class="original">${o}</div></div>`;
+        return`<div class="msg japanese"><div class="meta"><span class="author">${a}</span></div><div class="translated-text">${o}</div></div>`;
       }).join('');
     }
   }catch(e){}
