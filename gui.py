@@ -129,21 +129,23 @@ class App(ctk.CTk):
         bf.pack(fill="x", padx=14, pady=(0,10))
 
         self._btn_start = ctk.CTkButton(
-            bf, text="開始", fg_color="#1a936f", hover_color="#13704f",
-            text_color="white", font=ctk.CTkFont("Segoe UI",13,"bold"),
+            bf, text="開始", fg_color="#ffffff", hover_color="#f0faf5",
+            text_color="#1a1a1a", font=ctk.CTkFont("Segoe UI",13,"bold"),
+            border_width=1, border_color="#cccccc",
             height=36, corner_radius=6, width=BW1, command=self._start)
         self._btn_start.pack(side="left", padx=(0,GAP))
 
         self._btn_stop = ctk.CTkButton(
-            bf, text="停止", fg_color="#cccccc", hover_color="#cccccc",
-            text_color="#888888", font=ctk.CTkFont("Segoe UI",13,"bold"),
+            bf, text="停止", fg_color="#ffffff", hover_color="#fff0f0",
+            text_color="#bbbbbb", font=ctk.CTkFont("Segoe UI",13,"bold"),
+            border_width=1, border_color="#dddddd",
             height=36, corner_radius=6, width=BW1, command=self._stop, state="disabled")
         self._btn_stop.pack(side="left", padx=(0,GAP))
 
         self._btn_test = ctk.CTkButton(
-            bf, text="テスト", fg_color="#f0efe8", hover_color="#e0dfd8",
+            bf, text="テスト", fg_color="#ffffff", hover_color="#f5f5f5",
             text_color="#444444", font=ctk.CTkFont("Segoe UI",13),
-            border_width=1, border_color="#d8d7d0",
+            border_width=1, border_color="#dddddd",
             height=36, corner_radius=6, width=BW2, command=self._test)
         self._btn_test.pack(side="left")
 
@@ -250,9 +252,11 @@ class App(ctk.CTk):
             except Exception as e:
                 self.after(0, lambda: self._lbl_st.configure(
                     text=f" 接続エラー", text_color="#c0392b"))
-        self._btn_start.configure(state="disabled", fg_color="#aaaaaa")
-        self._btn_stop.configure(state="normal", fg_color="#c0392b",
-                                  hover_color="#922b21", text_color="white")
+        self._btn_start.configure(state="disabled", fg_color="#f5f5f5",
+                                   text_color="#bbbbbb", border_color="#e0e0e0")
+        self._btn_stop.configure(state="normal", fg_color="#fff0f0",
+                                  hover_color="#ffe0e0", text_color="#c0392b",
+                                  border_color="#f5a0a0")
         self._dot.configure(text_color="#1a936f")
         self._lbl_st.configure(text=f" 開始中…", text_color="#1a936f")
         threading.Thread(target=_do, daemon=True).start()
@@ -260,8 +264,10 @@ class App(ctk.CTk):
     def _stop(self):
         try: SESSION.get(f"http://localhost:{PORT}/stop", timeout=3)
         except: pass
-        self._btn_start.configure(state="normal", fg_color="#1a936f")
-        self._btn_stop.configure(state="disabled", fg_color="#cccccc", text_color="#888888")
+        self._btn_start.configure(state="normal", fg_color="#ffffff",
+                                   text_color="#1a1a1a", border_color="#cccccc")
+        self._btn_stop.configure(state="disabled", fg_color="#ffffff",
+                                  text_color="#bbbbbb", border_color="#dddddd")
         self._dot.configure(text_color="#bbbbbb")
         self._lbl_st.configure(text=" 待機中", text_color="#888888")
         self._render_msgs([])
@@ -274,7 +280,7 @@ class App(ctk.CTk):
         threading.Thread(target=_do, daemon=True).start()
         self._btn_test.configure(text="✓ 注入済", fg_color="#e8f5e9", text_color="#1a936f")
         self.after(1500, lambda: self._btn_test.configure(
-            text="テスト", fg_color="#f0efe8", text_color="#444444"))
+            text="テスト", fg_color="#ffffff", text_color="#444444"))
 
     def _open_url(self):
         webbrowser.open(OBS_URL)
@@ -303,74 +309,75 @@ class App(ctk.CTk):
             author     = m.get("author","")
             text       = translated if translated else original
 
-            # tk.Frame を使うことで fill="y" が確実に機能する
             outer = tk.Frame(self._msg_frame, bg=CARD_BG)
-            outer.pack(fill="x", pady=(0,4))
+            outer.pack(fill="x", pady=(0,8))
 
-            border_c = "#29b6f6" if translated else "#cccccc"
-
-            # tk.Frame を使うことで fill="y" が確実に機能する
-            outer = tk.Frame(self._msg_frame, bg=CARD_BG)
-            outer.pack(fill="x", pady=(0,4))
-
-            bar = tk.Frame(outer, bg=border_c, width=5)
-            bar.pack(side="left", fill="y")
-
-            inner = ctk.CTkFrame(outer, fg_color="transparent", width=284)
-            inner.pack(side="left", padx=(8,0), pady=3)
-            inner.pack_propagate(False)
-
-            # メタ行：① アイコン → ② 名前 → ③ バッジ
-            meta = ctk.CTkFrame(inner, fg_color="transparent")
-            meta.pack(anchor="w")
-
-            # ① アイコン
-            av_label = ctk.CTkLabel(meta, text="", fg_color="transparent", width=20, height=20)
-            av_label.pack(side="left", padx=(0,4))
+            # 左：アバター（28px丸）
+            av_col = tk.Frame(outer, bg=CARD_BG, width=34)
+            av_col.pack(side="left", anchor="n", padx=(0,8))
+            av_col.pack_propagate(False)
+            av_label = ctk.CTkLabel(av_col, text="●", text_color="#dddddd",
+                                    fg_color="transparent", width=28, height=28,
+                                    font=("Arial",22))
+            av_label.pack()
             if m.get("imageUrl"):
                 def _load_av(lbl=av_label, url=m["imageUrl"]):
-                    img = fetch_avatar(url, size=20)
+                    img = fetch_avatar(url, size=28)
                     if img:
-                        try: lbl.configure(image=img)
+                        try: lbl.configure(image=img, text="")
                         except: pass
                 threading.Thread(target=_load_av, daemon=True).start()
 
-            # ② 名前
-            ctk.CTkLabel(meta, text=author, text_color="#444444",
-                         font=ctk.CTkFont("Segoe UI",12,"bold"),
-                         fg_color="transparent").pack(side="left")
+            # 右：名前・バッジ・テキスト
+            right = tk.Frame(outer, bg=CARD_BG)
+            right.pack(side="left", fill="x", expand=True)
 
-            # ③ バッジ（画像 or テキスト）
+            # 名前 + バッジ
+            meta = tk.Frame(right, bg=CARD_BG)
+            meta.pack(fill="x")
+            ctk.CTkLabel(meta, text=author, text_color="#333333",
+                         font=ctk.CTkFont("Segoe UI",11,"bold"),
+                         fg_color="transparent").pack(side="left")
             if m.get("badgeUrl"):
-                badge_lbl = ctk.CTkLabel(meta, text="", fg_color="transparent", width=18, height=18)
-                badge_lbl.pack(side="left", padx=(5,0))
-                def _load_badge(lbl=badge_lbl, url=m["badgeUrl"]):
-                    img = fetch_avatar(url, size=18)
+                bl = ctk.CTkLabel(meta, text="", fg_color="transparent",
+                                  width=16, height=16)
+                bl.pack(side="left", padx=(4,0))
+                def _load_b(lbl=bl, url=m["badgeUrl"]):
+                    img = fetch_avatar(url, size=16)
                     if img:
                         try: lbl.configure(image=img)
                         except: pass
-                threading.Thread(target=_load_badge, daemon=True).start()
-            else:
-                if m.get("isOwner"):
-                    ctk.CTkLabel(meta, text=" 配信者 ", fg_color="#f1c40f", text_color="#000",
-                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(5,0))
-                elif m.get("isMod"):
-                    ctk.CTkLabel(meta, text=" モデ ", fg_color="#5865f2", text_color="#fff",
-                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(5,0))
-                if m.get("isMember"):
-                    ctk.CTkLabel(meta, text=" メンバー ", fg_color="#2ecc71", text_color="#000",
-                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(5,0))
+                threading.Thread(target=_load_b, daemon=True).start()
+            elif m.get("isOwner"):
+                ctk.CTkLabel(meta, text=" 配信者 ", fg_color="#f1c40f",
+                             text_color="#000", font=ctk.CTkFont("Segoe UI",8,"bold"),
+                             corner_radius=3).pack(side="left", padx=(4,0))
+            elif m.get("isMod"):
+                ctk.CTkLabel(meta, text=" モデ ", fg_color="#5865f2",
+                             text_color="#fff", font=ctk.CTkFont("Segoe UI",8,"bold"),
+                             corner_radius=3).pack(side="left", padx=(4,0))
+            if m.get("isMember") and not m.get("badgeUrl"):
+                ctk.CTkLabel(meta, text=" メンバー ", fg_color="#2ecc71",
+                             text_color="#000", font=ctk.CTkFont("Segoe UI",8,"bold"),
+                             corner_radius=3).pack(side="left", padx=(4,0))
 
-            # 翻訳テキスト（折り返し）
-            ctk.CTkLabel(inner, text=text, text_color="#1a1a1a",
-                         font=ctk.CTkFont("Segoe UI",13), fg_color="transparent",
-                         anchor="w", justify="left", wraplength=285).pack(anchor="w")
-
-            # 原文
+            # 言語バッジ（翻訳時のみ）+ テキスト
+            txt_row = tk.Frame(right, bg=CARD_BG)
+            txt_row.pack(fill="x", pady=(1,0))
             if translated:
-                ctk.CTkLabel(inner, text=original, text_color="#aaaaaa",
-                             font=ctk.CTkFont("Segoe UI",11), fg_color="transparent",
-                             anchor="w", justify="left", wraplength=285).pack(anchor="w")
+                ctk.CTkLabel(txt_row, text=f" {lang_label} ",
+                             fg_color=ACC, text_color="#000",
+                             font=ctk.CTkFont("Segoe UI",9,"bold"),
+                             corner_radius=4).pack(side="left", padx=(0,5))
+            ctk.CTkLabel(txt_row, text=text, text_color=FG1,
+                         font=ctk.CTkFont("Segoe UI",13), fg_color="transparent",
+                         anchor="w", justify="left", wraplength=255).pack(side="left")
+
+            # 原文（翻訳時のみ・薄グレー）
+            if translated:
+                ctk.CTkLabel(right, text=original, text_color=FG3,
+                             font=ctk.CTkFont("Segoe UI",10), fg_color="transparent",
+                             anchor="w", justify="left", wraplength=280).pack(fill="x")
 
             self._msg_widgets.append(outer)
 
