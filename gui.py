@@ -205,9 +205,11 @@ class App(ctk.CTk):
         if self._msg_visible:
             self._msg_frame.pack(fill="x", padx=14, pady=(0,6))
             self._lbl_msg_toggle.configure(text="直近のメッセージ  ▾")
+            self.geometry("360x600")
         else:
             self._msg_frame.pack_forget()
             self._lbl_msg_toggle.configure(text="直近のメッセージ  ▸")
+            self.geometry("360x370")
 
     def _get_vid(self, raw):
         """URLまたはIDからvideo_idを抽出"""
