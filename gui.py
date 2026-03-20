@@ -102,13 +102,23 @@ class App(ctk.CTk):
                                   font=("Arial",11), fg_color="transparent")
         self._dot.pack(side="left")
         self._lbl_st = ctk.CTkLabel(sf, text=" 待機中", text_color="#888888",
-                                     font=ctk.CTkFont("Segoe UI",12),
+                                     font=ctk.CTkFont("Yu Gothic UI",12),
                                      fg_color="transparent")
         self._lbl_st.pack(side="left")
 
+        # 翻訳APIステータス丸（右上）
+        api_frame = ctk.CTkFrame(sf, fg_color="transparent")
+        api_frame.pack(side="right")
+        ctk.CTkLabel(api_frame, text="翻訳API", text_color="#bbbbbb",
+                     font=ctk.CTkFont("Yu Gothic UI",10),
+                     fg_color="transparent").pack(side="left", padx=(0,4))
+        self._api_dot = ctk.CTkLabel(api_frame, text="●", text_color="#dddddd",
+                                      font=("Arial",12), fg_color="transparent")
+        self._api_dot.pack(side="left")
+
         # 入力ラベル
         ctk.CTkLabel(card, text="YouTube 配信URL",
-                     text_color="#888888", font=ctk.CTkFont("Segoe UI",12),
+                     text_color="#888888", font=ctk.CTkFont("Yu Gothic UI",12),
                      fg_color="transparent").pack(anchor="w", padx=14, pady=(10,3))
 
         # 入力欄
@@ -116,7 +126,7 @@ class App(ctk.CTk):
             card, placeholder_text="https://youtube.com/watch?v=...",
             fg_color="#ffffff", border_color="#dddddd", border_width=1,
             text_color="#333333", placeholder_text_color="#bbbbbb",
-            font=ctk.CTkFont("Segoe UI",12), height=36, corner_radius=6)
+            font=ctk.CTkFont("Yu Gothic UI",12), height=36, corner_radius=6)
         self._entry.pack(fill="x", padx=14, pady=(0,10))
         self._entry.bind("<Return>", lambda e: self._start())
 
@@ -130,21 +140,21 @@ class App(ctk.CTk):
 
         self._btn_start = ctk.CTkButton(
             bf, text="開始", fg_color="#ffffff", hover_color="#f0faf5",
-            text_color="#1a1a1a", font=ctk.CTkFont("Segoe UI",13,"bold"),
+            text_color="#1a1a1a", font=ctk.CTkFont("Yu Gothic UI",13,"bold"),
             border_width=1, border_color="#cccccc",
             height=36, corner_radius=6, width=BW1, command=self._start)
         self._btn_start.pack(side="left", padx=(0,GAP))
 
         self._btn_stop = ctk.CTkButton(
             bf, text="停止", fg_color="#ffffff", hover_color="#fff0f0",
-            text_color="#bbbbbb", font=ctk.CTkFont("Segoe UI",13,"bold"),
+            text_color="#bbbbbb", font=ctk.CTkFont("Yu Gothic UI",13,"bold"),
             border_width=1, border_color="#dddddd",
             height=36, corner_radius=6, width=BW1, command=self._stop, state="disabled")
         self._btn_stop.pack(side="left", padx=(0,GAP))
 
         self._btn_test = ctk.CTkButton(
             bf, text="テスト", fg_color="#ffffff", hover_color="#f5f5f5",
-            text_color="#444444", font=ctk.CTkFont("Segoe UI",13),
+            text_color="#444444", font=ctk.CTkFont("Yu Gothic UI",13),
             border_width=1, border_color="#dddddd",
             height=36, corner_radius=6, width=BW2, command=self._test)
         self._btn_test.pack(side="left")
@@ -155,7 +165,7 @@ class App(ctk.CTk):
                                 border_color="#e0dfd6")
         url_card.pack(fill="x", padx=14, pady=(0,10))
         ctk.CTkLabel(url_card, text="OBS ブラウザソース URL",
-                     text_color="#888888", font=ctk.CTkFont("Segoe UI",11),
+                     text_color="#888888", font=ctk.CTkFont("Yu Gothic UI",11),
                      fg_color="transparent").pack(anchor="w", padx=12, pady=(8,2))
         url_row = ctk.CTkFrame(url_card, fg_color="transparent")
         url_row.pack(fill="x", padx=12, pady=(0,8))
@@ -165,7 +175,7 @@ class App(ctk.CTk):
         self._btn_copy = ctk.CTkButton(
             url_row, text="開く", fg_color="#ffffff",
             hover_color="#f0efe8", text_color="#555555",
-            font=ctk.CTkFont("Segoe UI",11), border_width=1,
+            font=ctk.CTkFont("Yu Gothic UI",11), border_width=1,
             border_color="#d0cfc8", height=26, width=62, corner_radius=5,
             command=self._open_url)
         self._btn_copy.pack(side="right")
@@ -177,7 +187,7 @@ class App(ctk.CTk):
         msg_header.pack(fill="x", padx=14, pady=(0,4))
         self._lbl_msg_toggle = ctk.CTkLabel(
             msg_header, text="直近のメッセージ  ▾",
-            text_color="#888888", font=ctk.CTkFont("Segoe UI",11),
+            text_color="#888888", font=ctk.CTkFont("Yu Gothic UI",11),
             fg_color="transparent", cursor="hand2")
         self._lbl_msg_toggle.pack(side="left")
         self._lbl_msg_toggle.bind("<Button-1>", self._toggle_msgs)
@@ -187,27 +197,14 @@ class App(ctk.CTk):
         self._msg_frame.pack_propagate(False)
         self._lbl_empty = ctk.CTkLabel(
             self._msg_frame, text="開始するとここに表示されます",
-            text_color="#bbbbbb", font=ctk.CTkFont("Segoe UI",10),
+            text_color="#bbbbbb", font=ctk.CTkFont("Yu Gothic UI",10),
             fg_color="transparent")
         self._lbl_empty.pack(pady=10)
 
         # フッター
-        # フッター（翻訳API状態を丸で表示）
-        self._footer_frame = ctk.CTkFrame(card, fg_color="transparent")
-        self._footer_frame.pack(pady=(6,10))
-
-        ctk.CTkLabel(self._footer_frame, text="翻訳API",
-                     text_color="#aaaaaa", font=ctk.CTkFont("Segoe UI",10),
-                     fg_color="transparent").pack(side="left", padx=(0,6))
-        self._dot_green  = ctk.CTkLabel(self._footer_frame, text="●",
-                     text_color="#cccccc", font=("Arial",11), fg_color="transparent")
-        self._dot_green.pack(side="left", padx=1)
-        self._dot_yellow = ctk.CTkLabel(self._footer_frame, text="●",
-                     text_color="#cccccc", font=("Arial",11), fg_color="transparent")
-        self._dot_yellow.pack(side="left", padx=1)
-        self._dot_red    = ctk.CTkLabel(self._footer_frame, text="●",
-                     text_color="#cccccc", font=("Arial",11), fg_color="transparent")
-        self._dot_red.pack(side="left", padx=1)
+        # フッター（pack順序の基準点として使用）
+        self._footer_frame = ctk.CTkFrame(card, fg_color="transparent", height=8)
+        self._footer_frame.pack(pady=(4,8))
 
     # ── ボタンコールバック ──
     def _toggle_msgs(self, _=None):
@@ -313,12 +310,11 @@ class App(ctk.CTk):
             outer.pack(fill="x", pady=(0,8))
 
             # 左：アバター（28px丸）
-            av_col = tk.Frame(outer, bg=CARD_BG, width=34)
-            av_col.pack(side="left", anchor="n", padx=(0,8))
+            av_col = tk.Frame(outer, bg=CARD_BG, width=36)
+            av_col.pack(side="left", anchor="n", padx=(0,8), pady=(2,0))
             av_col.pack_propagate(False)
-            av_label = ctk.CTkLabel(av_col, text="●", text_color="#dddddd",
-                                    fg_color="transparent", width=28, height=28,
-                                    font=("Arial",22))
+            av_label = ctk.CTkLabel(av_col, text="", fg_color="transparent",
+                                    width=28, height=28)
             av_label.pack()
             if m.get("imageUrl"):
                 def _load_av(lbl=av_label, url=m["imageUrl"]):
@@ -336,7 +332,7 @@ class App(ctk.CTk):
             meta = tk.Frame(right, bg=CARD_BG)
             meta.pack(fill="x")
             ctk.CTkLabel(meta, text=author, text_color="#333333",
-                         font=ctk.CTkFont("Segoe UI",11,"bold"),
+                         font=ctk.CTkFont("Yu Gothic UI",11,"bold"),
                          fg_color="transparent").pack(side="left")
             if m.get("badgeUrl"):
                 bl = ctk.CTkLabel(meta, text="", fg_color="transparent",
@@ -350,15 +346,15 @@ class App(ctk.CTk):
                 threading.Thread(target=_load_b, daemon=True).start()
             elif m.get("isOwner"):
                 ctk.CTkLabel(meta, text=" 配信者 ", fg_color="#f1c40f",
-                             text_color="#000", font=ctk.CTkFont("Segoe UI",8,"bold"),
+                             text_color="#000", font=ctk.CTkFont("Yu Gothic UI",8,"bold"),
                              corner_radius=3).pack(side="left", padx=(4,0))
             elif m.get("isMod"):
                 ctk.CTkLabel(meta, text=" モデ ", fg_color="#5865f2",
-                             text_color="#fff", font=ctk.CTkFont("Segoe UI",8,"bold"),
+                             text_color="#fff", font=ctk.CTkFont("Yu Gothic UI",8,"bold"),
                              corner_radius=3).pack(side="left", padx=(4,0))
             if m.get("isMember") and not m.get("badgeUrl"):
                 ctk.CTkLabel(meta, text=" メンバー ", fg_color="#2ecc71",
-                             text_color="#000", font=ctk.CTkFont("Segoe UI",8,"bold"),
+                             text_color="#000", font=ctk.CTkFont("Yu Gothic UI",8,"bold"),
                              corner_radius=3).pack(side="left", padx=(4,0))
 
             # 言語バッジ（翻訳時のみ）+ テキスト
@@ -367,16 +363,16 @@ class App(ctk.CTk):
             if translated:
                 ctk.CTkLabel(txt_row, text=f" {lang_label} ",
                              fg_color=ACC, text_color="#000",
-                             font=ctk.CTkFont("Segoe UI",9,"bold"),
+                             font=ctk.CTkFont("Yu Gothic UI",9,"bold"),
                              corner_radius=4).pack(side="left", padx=(0,5))
             ctk.CTkLabel(txt_row, text=text, text_color=FG1,
-                         font=ctk.CTkFont("Segoe UI",13), fg_color="transparent",
+                         font=ctk.CTkFont("Yu Gothic UI",13), fg_color="transparent",
                          anchor="w", justify="left", wraplength=255).pack(side="left")
 
             # 原文（翻訳時のみ・薄グレー）
             if translated:
                 ctk.CTkLabel(right, text=original, text_color=FG3,
-                             font=ctk.CTkFont("Segoe UI",10), fg_color="transparent",
+                             font=ctk.CTkFont("Yu Gothic UI",10), fg_color="transparent",
                              anchor="w", justify="left", wraplength=280).pack(fill="x")
 
             self._msg_widgets.append(outer)
@@ -394,39 +390,16 @@ class App(ctk.CTk):
         self.after(800, self._poll)
 
     def _check_lt(self):
-        """翻訳API状態を確認して丸の色を更新
-        緑=接続OK / 黄=確認中 / 赤=エラー
-        """
-        # 確認中は黄色
-        self._dot_green.configure(text_color="#cccccc")
-        self._dot_yellow.configure(text_color="#f1c40f")
-        self._dot_red.configure(text_color="#cccccc")
-
+        """翻訳API状態確認: 緑=OK / 黄=確認中 / 赤=エラー"""
+        self.after(0, lambda: self._api_dot.configure(text_color="#f1c40f"))  # 確認中=黄
         def _do():
             try:
                 r = SESSION.get(f"http://localhost:{PORT}/lt_check", timeout=8)
                 ok = r.ok and r.json().get("status") == "ok"
-                if ok:
-                    # 接続OK → 緑
-                    self.after(0, lambda: [
-                        self._dot_green.configure(text_color="#2ecc71"),
-                        self._dot_yellow.configure(text_color="#cccccc"),
-                        self._dot_red.configure(text_color="#cccccc"),
-                    ])
-                else:
-                    # エラー → 赤
-                    self.after(0, lambda: [
-                        self._dot_green.configure(text_color="#cccccc"),
-                        self._dot_yellow.configure(text_color="#cccccc"),
-                        self._dot_red.configure(text_color="#e74c3c"),
-                    ])
+                color = "#2ecc71" if ok else "#e74c3c"
             except:
-                # 接続失敗 → 赤
-                self.after(0, lambda: [
-                    self._dot_green.configure(text_color="#cccccc"),
-                    self._dot_yellow.configure(text_color="#cccccc"),
-                    self._dot_red.configure(text_color="#e74c3c"),
-                ])
+                color = "#e74c3c"
+            self.after(0, lambda: self._api_dot.configure(text_color=color))
         threading.Thread(target=_do, daemon=True).start()
         self.after(30000, self._check_lt)
 
