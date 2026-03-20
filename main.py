@@ -24,7 +24,9 @@ import requests
 from langdetect import detect, LangDetectException
 
 # ===== 設定 =====
-LIBRETRANSLATE_URL = "http://192.168.1.15:5000/translate"
+# 暫定: Tailscale経由 (LAN直通 192.168.1.15:5000 は疎通問題のため socat 転送を使用)
+# 本来: http://192.168.1.15:5000/translate
+LIBRETRANSLATE_URL = "http://100.103.151.109:5001/translate"
 OVERLAY_PORT = 7788
 MAX_MESSAGES = 20
 MIN_CHARS = 3
