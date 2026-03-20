@@ -9,9 +9,13 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":7788 " ^| findstr "LISTENIN
 )
 
 cd /d %~dp0
-if "%1"=="" (
-    python main.py
+
+REM GUIモード（引数なし）かCLIモード（video_id指定）かを選択
+if "%1"=="--cli" (
+    echo [CLIモード] python main.py %2
+    python main.py %2
+    pause
 ) else (
-    python main.py %1
+    echo [GUIモード] python gui.py
+    pythonw gui.py
 )
-pause
