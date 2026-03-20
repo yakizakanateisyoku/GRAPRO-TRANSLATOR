@@ -6,4 +6,4 @@ venv/
 .venv/
 dist/
 build/
-*.spec
+# *.spec  # specファイルはリポジトリ管理（再ビルド用）
