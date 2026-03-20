@@ -68,7 +68,7 @@ class App(tk.Tk):
         pad = dict(padx=14, pady=6)
 
         # ─── タイトル ───
-        ttk.Label(self, text="🎌  OBS Chat Translator", style="Title.TLabel").pack(**pad, pady=(14,2))
+        ttk.Label(self, text="🎌  OBS Chat Translator", style="Title.TLabel").pack(padx=14, pady=(14,2))
         ttk.Separator(self, orient="horizontal").pack(fill="x", padx=10)
 
         # ─── Video ID 入力 ───
