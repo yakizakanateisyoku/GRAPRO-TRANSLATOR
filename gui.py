@@ -262,40 +262,43 @@ class App(ctk.CTk):
             author     = m.get("author","")
             text       = translated if translated else original
 
-            # 外枠（左ボーダー付き）
             outer = ctk.CTkFrame(self._msg_frame, fg_color="transparent")
-            outer.pack(fill="x", pady=(0,3))
+            outer.pack(anchor="w", pady=(0,3))
 
             border_c = "#29b6f6" if translated else "#cccccc"
             bar = ctk.CTkFrame(outer, fg_color=border_c, width=3, corner_radius=0)
             bar.pack(side="left", fill="y", pady=2)
             bar.pack_propagate(False)
 
-            inner = ctk.CTkFrame(outer, fg_color="transparent")
-            inner.pack(side="left", fill="x", expand=True, padx=(6,0), pady=2)
+            inner = ctk.CTkFrame(outer, fg_color="transparent", width=290)
+            inner.pack(side="left", padx=(6,0), pady=2)
+            inner.pack_propagate(False)
 
-            # ── 著者 + バッジ行 ──
+            # メタ行：① アイコン → ② 名前 → ③ バッジ
             meta = ctk.CTkFrame(inner, fg_color="transparent")
-            meta.pack(fill="x")
+            meta.pack(anchor="w")
 
-            # アバター（バックグラウンドで取得して後から差し込む）
-            av_label = ctk.CTkLabel(meta, text="", fg_color="transparent", width=22, height=22)
+            # ① アイコン
+            av_label = ctk.CTkLabel(meta, text="", fg_color="transparent", width=20, height=20)
             av_label.pack(side="left", padx=(0,4))
-            img_url = m.get("imageUrl","")
-            if img_url:
-                def _load_av(lbl=av_label, url=img_url):
-                    img = fetch_avatar(url)
+            if m.get("imageUrl"):
+                def _load_av(lbl=av_label, url=m["imageUrl"]):
+                    img = fetch_avatar(url, size=20)
                     if img:
                         try: lbl.configure(image=img)
                         except: pass
                 threading.Thread(target=_load_av, daemon=True).start()
 
-            # バッジ（画像があれば画像優先、なければテキストバッジ）
-            badge_url = m.get("badgeUrl", "")
-            if badge_url:
+            # ② 名前
+            ctk.CTkLabel(meta, text=author, text_color="#444444",
+                         font=ctk.CTkFont("Segoe UI",12,"bold"),
+                         fg_color="transparent").pack(side="left")
+
+            # ③ バッジ（画像 or テキスト）
+            if m.get("badgeUrl"):
                 badge_lbl = ctk.CTkLabel(meta, text="", fg_color="transparent", width=18, height=18)
-                badge_lbl.pack(side="left", padx=(4,0))
-                def _load_badge(lbl=badge_lbl, url=badge_url):
+                badge_lbl.pack(side="left", padx=(5,0))
+                def _load_badge(lbl=badge_lbl, url=m["badgeUrl"]):
                     img = fetch_avatar(url, size=18)
                     if img:
                         try: lbl.configure(image=img)
@@ -304,40 +307,24 @@ class App(ctk.CTk):
             else:
                 if m.get("isOwner"):
                     ctk.CTkLabel(meta, text=" 配信者 ", fg_color="#f1c40f", text_color="#000",
-                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(4,0))
+                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(5,0))
                 elif m.get("isMod"):
                     ctk.CTkLabel(meta, text=" モデ ", fg_color="#5865f2", text_color="#fff",
-                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(4,0))
+                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(5,0))
                 if m.get("isMember"):
                     ctk.CTkLabel(meta, text=" メンバー ", fg_color="#2ecc71", text_color="#000",
-                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(4,0))
+                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(5,0))
 
-            ctk.CTkLabel(meta, text=author,
-                         text_color="#444444",
-                         font=ctk.CTkFont("Segoe UI",12,"bold"),
-                         fg_color="transparent").pack(side="left")
+            # 翻訳テキスト（折り返し）
+            ctk.CTkLabel(inner, text=text, text_color="#1a1a1a",
+                         font=ctk.CTkFont("Segoe UI",13), fg_color="transparent",
+                         anchor="w", justify="left", wraplength=285).pack(anchor="w")
+
+            # 原文
             if translated:
-                ctk.CTkLabel(meta,
-                             text=f"  {lang_label}  ",
-                             text_color="#000000",
-                             fg_color="#29b6f6",
-                             font=ctk.CTkFont("Segoe UI",10,"bold"),
-                             corner_radius=4).pack(side="left", padx=(6,0), pady=1)
-
-            ctk.CTkLabel(inner, text=text,
-                         text_color="#1a1a1a",
-                         font=ctk.CTkFont("Segoe UI",13),
-                         fg_color="transparent",
-                         anchor="w", justify="left",
-                         wraplength=270).pack(fill="x")
-
-            if translated:
-                ctk.CTkLabel(inner, text=original,
-                             text_color="#aaaaaa",
-                             font=ctk.CTkFont("Segoe UI",11),
-                             fg_color="transparent",
-                             anchor="w", justify="left",
-                             wraplength=270).pack(fill="x")
+                ctk.CTkLabel(inner, text=original, text_color="#aaaaaa",
+                             font=ctk.CTkFont("Segoe UI",11), fg_color="transparent",
+                             anchor="w", justify="left", wraplength=285).pack(anchor="w")
 
             self._msg_widgets.append(outer)
 
