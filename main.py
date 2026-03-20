@@ -28,7 +28,7 @@ from langdetect import detect, LangDetectException
 # 公開IP経由 (MAP-E固定IP → Proxmox socat → LXC LibreTranslate)
 # 123.225.35.19:5000 → 192.168.1.11:5001 → 192.168.1.15:5000
 LIBRETRANSLATE_URL = "http://123.225.35.19:5000/translate"
-LIBRETRANSLATE_API_KEY = "f3f7ed5c-0e6f-40ec-b5b2-fc989a8caa62"
+LIBRETRANSLATE_API_KEY = "c57f841d-53f3-4d83-a9ab-24288ed44413"  # 500 req/min
 OVERLAY_PORT       = 7788
 MAX_MESSAGES       = 20    # オーバーレイ表示の最大件数
 MIN_CHARS          = 3     # 翻訳する最小文字数
