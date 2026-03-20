@@ -28,6 +28,7 @@ from langdetect import detect, LangDetectException
 # 公開IP経由 (MAP-E固定IP → Proxmox socat → LXC LibreTranslate)
 # 123.225.35.19:5000 → 192.168.1.11:5001 → 192.168.1.15:5000
 LIBRETRANSLATE_URL = "http://123.225.35.19:5000/translate"
+LIBRETRANSLATE_API_KEY = "f3f7ed5c-0e6f-40ec-b5b2-fc989a8caa62"
 OVERLAY_PORT       = 7788
 MAX_MESSAGES       = 20    # オーバーレイ表示の最大件数
 MIN_CHARS          = 3     # 翻訳する最小文字数
@@ -79,7 +80,8 @@ def translate_text(text, source_lang):
     """LibreTranslate で翻訳。失敗時は原文を返す"""
     try:
         resp = requests.post(LIBRETRANSLATE_URL, json={
-            "q": text, "source": source_lang, "target": TARGET_LANG, "format": "text"
+            "q": text, "source": source_lang, "target": TARGET_LANG, "format": "text",
+            "api_key": LIBRETRANSLATE_API_KEY,
         }, timeout=5)
         if resp.status_code == 200:
             return resp.json().get("translatedText", text)
@@ -272,7 +274,8 @@ def lt_check():
     """LibreTranslate 疎通確認"""
     try:
         resp = requests.post(LIBRETRANSLATE_URL, json={
-            "q": "Hello world", "source": "en", "target": "ja", "format": "text"
+            "q": "Hello world", "source": "en", "target": "ja", "format": "text",
+            "api_key": LIBRETRANSLATE_API_KEY,
         }, timeout=5)
         if resp.status_code == 200:
             return jsonify({"status": "ok", "result": resp.json().get("translatedText", "")})
