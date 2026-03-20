@@ -21,6 +21,7 @@ import queue
 import sys
 from flask import Flask, render_template_string, jsonify
 import pytchat
+from pytchat.core.pytchat import PytchatCore
 import requests
 from langdetect import detect, LangDetectException
 
@@ -113,15 +114,23 @@ def translation_worker():
         except queue.Empty:
             continue
 
-        author  = item["author"]
-        message = item["message"]
-        lang    = item["lang"]
+        author   = item["author"]
+        message  = item["message"]
+        lang     = item["lang"]
+        imageUrl = item.get("imageUrl", "")
+        isMember = item.get("isMember", False)
+        isMod    = item.get("isMod", False)
+        isOwner  = item.get("isOwner", False)
 
         if lang == TARGET_LANG:
-            entry = {"author": author, "original": message, "translated": None, "lang": lang}
+            entry = {"author": author, "original": message, "translated": None,
+                     "lang": lang, "imageUrl": imageUrl,
+                     "isMember": isMember, "isMod": isMod, "isOwner": isOwner}
         else:
             translated = translate_text(message, lang)
-            entry = {"author": author, "original": message, "translated": translated, "lang": lang}
+            entry = {"author": author, "original": message, "translated": translated,
+                     "lang": lang, "imageUrl": imageUrl,
+                     "isMember": isMember, "isMod": isMod, "isOwner": isOwner}
 
         with messages_lock:
             chat_messages.insert(0, entry)
@@ -137,20 +146,33 @@ def chat_worker(video_id):
     """pytchat でチャット取得 → 言語判定 → 翻訳キューへ投入"""
     print(f"[チャット開始] video_id={video_id}")
     try:
-        chat = pytchat.create(video_id=video_id)
+        # signal.signal はメインスレッド以外で使えないため interruptable=False で回避
+        chat = PytchatCore(video_id=video_id, interruptable=False)
+        print(f"[pytchat] is_alive={chat.is_alive()}")
         while chat.is_alive() and not stop_event.is_set():
-            for item in chat.get().sync_items():
+            data = chat.get()
+            items = list(data.sync_items())
+            if items:
+                print(f"[pytchat] {len(items)}件取得")
+            for item in items:
                 lang = detect_language(item.message)
                 if lang is None:
                     continue
                 translation_q.put({
-                    "author":  item.author.name,
-                    "message": item.message,
-                    "lang":    lang,
+                    "author":   item.author.name,
+                    "message":  item.message,
+                    "lang":     lang,
+                    "imageUrl": getattr(item.author, "imageUrl", ""),
+                    "isMember": getattr(item.author, "isChatSponsor", False),
+                    "isMod":    getattr(item.author, "isChatModerator", False),
+                    "isOwner":  getattr(item.author, "isChatOwner", False),
                 })
             time.sleep(0.5)
+        print(f"[pytchat] ループ終了 is_alive={chat.is_alive()} stop={stop_event.is_set()}")
     except Exception as e:
+        import traceback
         print(f"[チャットエラー] {e}")
+        traceback.print_exc()
     print("[チャット終了]")
 
 
@@ -175,8 +197,12 @@ OVERLAY_HTML = """<!DOCTYPE html>
   .msg.translated{border-left:4px solid #29b6f6}
   .msg.japanese{border-left:4px solid #555}
   .meta{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+  .avatar{width:22px;height:22px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1px solid rgba(255,255,255,0.3)}
   .author{color:#ffe066;font-weight:bold;font-size:14px}
   .lang-badge{font-size:11px;background:#29b6f6;color:#003;border-radius:4px;padding:1px 7px;font-weight:bold;text-shadow:none !important;display:inline-block}
+  .badge-member{font-size:10px;background:#2ecc71;color:#000;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
+  .badge-mod{font-size:10px;background:#5865f2;color:#fff;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
+  .badge-owner{font-size:10px;background:#f1c40f;color:#000;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
   .translated-text{color:#ffffff;font-size:18px}
   .original{color:#bbb;font-size:13px;margin-top:3px}
   @keyframes fadein{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
@@ -195,14 +221,22 @@ async function poll(){
       lastKey=key;
       document.getElementById('messages').innerHTML=show.map(m=>{
         const a=esc(m.author),o=esc(m.original);
-        if(m.translated)return`<div class="msg translated"><div class="meta"><span class="author">${a}</span><span class="lang-badge">${langName(m.lang)}</span></div><div class="translated-text">${esc(m.translated)}</div><div class="original">${o}</div></div>`;
-        return`<div class="msg japanese"><div class="meta"><span class="author">${a}</span></div><div class="translated-text">${o}</div></div>`;
+        if(m.translated)return`<div class="msg translated"><div class="meta">${avatar(m)}${badges(m)}<span class="author">${a}</span><span class="lang-badge">${langName(m.lang)}</span></div><div class="translated-text">${esc(m.translated)}</div><div class="original">${o}</div></div>`;
+        return`<div class="msg japanese"><div class="meta">${avatar(m)}${badges(m)}<span class="author">${a}</span></div><div class="translated-text">${o}</div></div>`;
       }).join('');
     }
   }catch(e){}
   setTimeout(poll,1000);
 }
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function avatar(m){return m.imageUrl?`<img class="avatar" src="${esc(m.imageUrl)}" onerror="this.style.display='none'">`:''}
+function badges(m){
+  let b='';
+  if(m.isOwner)b+=`<span class="badge-owner">配信者</span>`;
+  else if(m.isMod)b+=`<span class="badge-mod">モデ</span>`;
+  if(m.isMember)b+=`<span class="badge-member">メンバー</span>`;
+  return b;
+}
 const LANG={af:'アフリカーンス語',ar:'アラビア語',az:'アゼルバイジャン語',bg:'ブルガリア語',bn:'ベンガル語',ca:'カタルーニャ語',cs:'チェコ語',da:'デンマーク語',de:'ドイツ語',el:'ギリシャ語',en:'英語',eo:'エスペラント語',es:'スペイン語',et:'エストニア語',fa:'ペルシャ語',fi:'フィンランド語',fr:'フランス語',he:'ヘブライ語',hi:'ヒンディー語',hu:'ハンガリー語',id:'インドネシア語',it:'イタリア語',ko:'韓国語',lt:'リトアニア語',lv:'ラトビア語',ms:'マレー語',nl:'オランダ語',pl:'ポーランド語',pt:'ポルトガル語','pt-br':'ポルトガル語(BR)',ro:'ルーマニア語',ru:'ロシア語',sk:'スロバキア語',sl:'スロベニア語',sq:'アルバニア語',sv:'スウェーデン語',th:'タイ語',tl:'タガログ語',tr:'トルコ語',uk:'ウクライナ語',ur:'ウルドゥー語',vi:'ベトナム語',zh:'中国語','zh-cn':'中国語','zh-hans':'中国語(簡体)','zh-tw':'中国語(繁体)','zh-hant':'中国語(繁体)'};
 function langName(c){return LANG[c.toLowerCase()]||c;}
 poll();
