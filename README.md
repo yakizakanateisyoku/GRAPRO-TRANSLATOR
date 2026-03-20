@@ -54,10 +54,9 @@ python main.py
 セルフホスト（LXC 192.168.1.15:5000）を使用。
 `main.py` の `LIBRETRANSLATE_URL` を環境に合わせて変更。
 
-> ⚠️ ネットワーク問題: OMEN（192.168.1.13）から LXC（192.168.1.15）への直接通信不可。
-> 暫定対策: Proxmox ホストで socat 転送（`192.168.1.15:5000` → `0.0.0.0:5001`）を設定。
-> Tailscale 経由（`http://100.103.151.109:5001/translate`）でアクセス可能。
-> 根本解決: OMEN のデフォルトGW を 192.168.1.254 に変更するか VLAN 設定を見直す。
+> 公開エンドポイント: `http://123.225.35.19:5000/translate`
+> 経路: IX2215 NAPTル → Proxmox socat (192.168.1.11:5001) → LXC LibreTranslate (192.168.1.15:5000)
+> ⚠️ 認証未設定（TODO: Nginx + APIキー認証）
 
 ## TODO
 
