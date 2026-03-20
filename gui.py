@@ -105,10 +105,6 @@ class App(ctk.CTk):
                                      font=ctk.CTkFont("Segoe UI",12),
                                      fg_color="transparent")
         self._lbl_st.pack(side="left")
-        self._lbl_cnt = ctk.CTkLabel(sf, text="翻訳数: 0", text_color="#888888",
-                                      font=ctk.CTkFont("Segoe UI",12),
-                                      fg_color="transparent")
-        self._lbl_cnt.pack(side="right")
 
         # 入力ラベル
         ctk.CTkLabel(card, text="YouTube 配信URL",
@@ -194,16 +190,30 @@ class App(ctk.CTk):
         self._lbl_empty.pack(pady=10)
 
         # フッター
-        self._lbl_lt = ctk.CTkLabel(
-            card, text="翻訳API: 確認中…", text_color="#aaaaaa",
-            font=ctk.CTkFont("Segoe UI",10), fg_color="transparent")
-        self._lbl_lt.pack(pady=(6,10))
+        # フッター（翻訳API状態を丸で表示）
+        self._footer_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self._footer_frame.pack(pady=(6,10))
+
+        ctk.CTkLabel(self._footer_frame, text="翻訳API",
+                     text_color="#aaaaaa", font=ctk.CTkFont("Segoe UI",10),
+                     fg_color="transparent").pack(side="left", padx=(0,6))
+        self._dot_green  = ctk.CTkLabel(self._footer_frame, text="●",
+                     text_color="#cccccc", font=("Arial",11), fg_color="transparent")
+        self._dot_green.pack(side="left", padx=1)
+        self._dot_yellow = ctk.CTkLabel(self._footer_frame, text="●",
+                     text_color="#cccccc", font=("Arial",11), fg_color="transparent")
+        self._dot_yellow.pack(side="left", padx=1)
+        self._dot_red    = ctk.CTkLabel(self._footer_frame, text="●",
+                     text_color="#cccccc", font=("Arial",11), fg_color="transparent")
+        self._dot_red.pack(side="left", padx=1)
 
     # ── ボタンコールバック ──
     def _toggle_msgs(self, _=None):
         self._msg_visible = not self._msg_visible
         if self._msg_visible:
-            self._msg_frame.pack(fill="x", padx=14, pady=(0,6))
+            # フッターの直前に挿入することで順序を維持
+            self._msg_frame.pack(fill="x", padx=14, pady=(0,6),
+                                 before=self._footer_frame)
             self._lbl_msg_toggle.configure(text="直近のメッセージ  ▾")
             self.geometry("360x600")
         else:
@@ -254,7 +264,6 @@ class App(ctk.CTk):
         self._btn_stop.configure(state="disabled", fg_color="#cccccc", text_color="#888888")
         self._dot.configure(text_color="#bbbbbb")
         self._lbl_st.configure(text=" 待機中", text_color="#888888")
-        self._lbl_cnt.configure(text="翻訳数: 0")
         self._render_msgs([])
 
     def _test(self):
@@ -372,23 +381,45 @@ class App(ctk.CTk):
                 r = SESSION.get(f"http://localhost:{PORT}/messages", timeout=1)
                 if r.ok:
                     msgs = r.json()
-                    self.after(0, lambda: self._lbl_cnt.configure(
-                        text=f"翻訳数: {len(msgs)}"))
                     self.after(0, lambda: self._render_msgs(msgs))
             except: pass
         threading.Thread(target=_do, daemon=True).start()
         self.after(800, self._poll)
 
     def _check_lt(self):
+        """翻訳API状態を確認して丸の色を更新
+        緑=接続OK / 黄=確認中 / 赤=エラー
+        """
+        # 確認中は黄色
+        self._dot_green.configure(text_color="#cccccc")
+        self._dot_yellow.configure(text_color="#f1c40f")
+        self._dot_red.configure(text_color="#cccccc")
+
         def _do():
             try:
                 r = SESSION.get(f"http://localhost:{PORT}/lt_check", timeout=8)
                 ok = r.ok and r.json().get("status") == "ok"
-                txt = "翻訳API: ✅ 接続OK" if ok else "翻訳API: ⚠️ エラー"
-                col = "#1a936f" if ok else "#c0392b"
+                if ok:
+                    # 接続OK → 緑
+                    self.after(0, lambda: [
+                        self._dot_green.configure(text_color="#2ecc71"),
+                        self._dot_yellow.configure(text_color="#cccccc"),
+                        self._dot_red.configure(text_color="#cccccc"),
+                    ])
+                else:
+                    # エラー → 赤
+                    self.after(0, lambda: [
+                        self._dot_green.configure(text_color="#cccccc"),
+                        self._dot_yellow.configure(text_color="#cccccc"),
+                        self._dot_red.configure(text_color="#e74c3c"),
+                    ])
             except:
-                txt, col = "翻訳API: ❌ 接続失敗", "#c0392b"
-            self.after(0, lambda: self._lbl_lt.configure(text=txt, text_color=col))
+                # 接続失敗 → 赤
+                self.after(0, lambda: [
+                    self._dot_green.configure(text_color="#cccccc"),
+                    self._dot_yellow.configure(text_color="#cccccc"),
+                    self._dot_red.configure(text_color="#e74c3c"),
+                ])
         threading.Thread(target=_do, daemon=True).start()
         self.after(30000, self._check_lt)
 
