@@ -163,35 +163,42 @@ def translation_worker():
 def chat_worker(video_id):
     """pytchat でチャット取得 → 言語判定 → 翻訳キューへ投入"""
     print(f"[チャット開始] video_id={video_id}")
-    try:
-        # signal.signal はメインスレッド以外で使えないため interruptable=False で回避
-        chat = PytchatCore(video_id=video_id, interruptable=False)
-        print(f"[pytchat] is_alive={chat.is_alive()}")
-        while chat.is_alive() and not stop_event.is_set():
-            data = chat.get()
-            items = list(data.sync_items())
-            if items:
-                print(f"[pytchat] {len(items)}件取得")
-            for item in items:
-                lang = detect_language(item.message)
-                if lang is None:
-                    continue
-                translation_q.put({
-                    "author":   item.author.name,
-                    "message":  item.message,
-                    "lang":     lang,
-                    "imageUrl": getattr(item.author, "imageUrl", ""),
-                    "badgeUrl": getattr(item.author, "badgeUrl", ""),
-                    "isMember": getattr(item.author, "isChatSponsor", False),
-                    "isMod":    getattr(item.author, "isChatModerator", False),
-                    "isOwner":  getattr(item.author, "isChatOwner", False),
-                })
-            time.sleep(0.5)
-        print(f"[pytchat] ループ終了 is_alive={chat.is_alive()} stop={stop_event.is_set()}")
-    except Exception as e:
-        import traceback
-        print(f"[チャットエラー] {e}")
-        traceback.print_exc()
+    retry = 0
+    while not stop_event.is_set():
+        try:
+            chat = PytchatCore(video_id=video_id, interruptable=False)
+            print(f"[pytchat] 接続成功 is_alive={chat.is_alive()} retry={retry}")
+            retry = 0
+            while chat.is_alive() and not stop_event.is_set():
+                data = chat.get()
+                items = list(data.sync_items())
+                for item in items:
+                    lang = detect_language(item.message)
+                    if lang is None:
+                        continue
+                    translation_q.put({
+                        "author":   item.author.name,
+                        "message":  item.message,
+                        "lang":     lang,
+                        "imageUrl": getattr(item.author, "imageUrl", ""),
+                        "badgeUrl": getattr(item.author, "badgeUrl", ""),
+                        "isMember": getattr(item.author, "isChatSponsor", False),
+                        "isMod":    getattr(item.author, "isChatModerator", False),
+                        "isOwner":  getattr(item.author, "isChatOwner", False),
+                    })
+                time.sleep(0.3)
+            if not stop_event.is_set():
+                print(f"[pytchat] 接続切断、3秒後に再接続 retry={retry+1}")
+                time.sleep(3)
+                retry += 1
+        except Exception as e:
+            print(f"[チャットエラー] {e}")
+            if not stop_event.is_set():
+                time.sleep(3)
+                retry += 1
+        if retry >= 5:
+            print("[pytchat] 再接続5回失敗、終了")
+            break
     print("[チャット終了]")
 
 

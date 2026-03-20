@@ -173,9 +173,17 @@ class App(ctk.CTk):
         self._btn_copy.pack(side="right")
 
         # ── 直近のメッセージ ──
-        ctk.CTkLabel(card, text="直近のメッセージ", text_color="#888888",
-                     font=ctk.CTkFont("Segoe UI",11),
-                     fg_color="transparent").pack(anchor="w", padx=14, pady=(0,4))
+        # 直近のメッセージ（クリックで折りたたみ）
+        self._msg_visible = True
+        msg_header = ctk.CTkFrame(card, fg_color="transparent")
+        msg_header.pack(fill="x", padx=14, pady=(0,4))
+        self._lbl_msg_toggle = ctk.CTkLabel(
+            msg_header, text="直近のメッセージ  ▾",
+            text_color="#888888", font=ctk.CTkFont("Segoe UI",11),
+            fg_color="transparent", cursor="hand2")
+        self._lbl_msg_toggle.pack(side="left")
+        self._lbl_msg_toggle.bind("<Button-1>", self._toggle_msgs)
+
         self._msg_frame = ctk.CTkFrame(card, fg_color="transparent", height=200)
         self._msg_frame.pack(fill="x", padx=14, pady=(0,6))
         self._msg_frame.pack_propagate(False)
@@ -192,6 +200,15 @@ class App(ctk.CTk):
         self._lbl_lt.pack(pady=(6,10))
 
     # ── ボタンコールバック ──
+    def _toggle_msgs(self, _=None):
+        self._msg_visible = not self._msg_visible
+        if self._msg_visible:
+            self._msg_frame.pack(fill="x", padx=14, pady=(0,6))
+            self._lbl_msg_toggle.configure(text="直近のメッセージ  ▾")
+        else:
+            self._msg_frame.pack_forget()
+            self._lbl_msg_toggle.configure(text="直近のメッセージ  ▸")
+
     def _get_vid(self, raw):
         """URLまたはIDからvideo_idを抽出"""
         raw = raw.strip()
@@ -358,7 +375,7 @@ class App(ctk.CTk):
                     self.after(0, lambda: self._render_msgs(msgs))
             except: pass
         threading.Thread(target=_do, daemon=True).start()
-        self.after(2000, self._poll)
+        self.after(800, self._poll)
 
     def _check_lt(self):
         def _do():
