@@ -34,6 +34,34 @@ MIN_CHARS          = 3     # 翻訳する最小文字数
 TARGET_LANG        = "ja"  # 翻訳先言語
 NUM_WORKERS        = 3     # 翻訳ワーカースレッド数
 
+# 言語コード → 日本語表示名
+LANG_NAMES = {
+    "af": "アフリカーンス語", "ar": "アラビア語", "az": "アゼルバイジャン語",
+    "bg": "ブルガリア語", "bn": "ベンガル語", "ca": "カタルーニャ語",
+    "cs": "チェコ語", "cy": "ウェールズ語", "da": "デンマーク語",
+    "de": "ドイツ語", "el": "ギリシャ語", "en": "英語",
+    "eo": "エスペラント語", "es": "スペイン語", "et": "エストニア語",
+    "eu": "バスク語", "fa": "ペルシャ語", "fi": "フィンランド語",
+    "fr": "フランス語", "ga": "アイルランド語", "gl": "ガリシア語",
+    "gu": "グジャラート語", "he": "ヘブライ語", "hi": "ヒンディー語",
+    "hr": "クロアチア語", "hu": "ハンガリー語", "hy": "アルメニア語",
+    "id": "インドネシア語", "is": "アイスランド語", "it": "イタリア語",
+    "ja": "日本語", "ka": "ジョージア語", "kk": "カザフ語",
+    "km": "クメール語", "ko": "韓国語", "ky": "キルギス語",
+    "lt": "リトアニア語", "lv": "ラトビア語", "mk": "マケドニア語",
+    "ml": "マラヤーラム語", "mn": "モンゴル語", "mr": "マラーティー語",
+    "ms": "マレー語", "mt": "マルタ語", "nb": "ノルウェー語",
+    "nl": "オランダ語", "pl": "ポーランド語", "pt": "ポルトガル語",
+    "pt-br": "ポルトガル語(BR)", "ro": "ルーマニア語", "ru": "ロシア語",
+    "sk": "スロバキア語", "sl": "スロベニア語", "sq": "アルバニア語",
+    "sr": "セルビア語", "sv": "スウェーデン語", "sw": "スワヒリ語",
+    "ta": "タミル語", "te": "テルグ語", "th": "タイ語",
+    "tl": "タガログ語", "tr": "トルコ語", "uk": "ウクライナ語",
+    "ur": "ウルドゥー語", "vi": "ベトナム語",
+    "zh": "中国語", "zh-cn": "中国語", "zh-hans": "中国語(簡体)",
+    "zh-tw": "中国語(繁体)", "zh-hant": "中国語(繁体)",
+}
+
 # ===== グローバル状態 =====
 chat_messages   = []          # 表示用メッセージリスト
 messages_lock   = threading.Lock()
@@ -160,7 +188,7 @@ async function poll(){
       lastCount=data.length;
       document.getElementById('messages').innerHTML=data.map(m=>{
         const a=esc(m.author),o=esc(m.original);
-        if(m.translated)return`<div class="msg translated"><span class="author">${a}</span><span class="lang-badge">${m.lang}</span><div>${esc(m.translated)}</div><div class="original">${o}</div></div>`;
+        if(m.translated)return`<div class="msg translated"><span class="author">${a}</span><span class="lang-badge">${langName(m.lang)}</span><div>${esc(m.translated)}</div><div class="original">${o}</div></div>`;
         return`<div class="msg japanese"><span class="author">${a}</span><div>${o}</div></div>`;
       }).join('');
     }
@@ -168,6 +196,8 @@ async function poll(){
   setTimeout(poll,1000);
 }
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+const LANG={af:'アフリカーンス語',ar:'アラビア語',az:'アゼルバイジャン語',bg:'ブルガリア語',bn:'ベンガル語',ca:'カタルーニャ語',cs:'チェコ語',da:'デンマーク語',de:'ドイツ語',el:'ギリシャ語',en:'英語',eo:'エスペラント語',es:'スペイン語',et:'エストニア語',fa:'ペルシャ語',fi:'フィンランド語',fr:'フランス語',he:'ヘブライ語',hi:'ヒンディー語',hu:'ハンガリー語',id:'インドネシア語',it:'イタリア語',ko:'韓国語',lt:'リトアニア語',lv:'ラトビア語',ms:'マレー語',nl:'オランダ語',pl:'ポーランド語',pt:'ポルトガル語','pt-br':'ポルトガル語(BR)',ro:'ルーマニア語',ru:'ロシア語',sk:'スロバキア語',sl:'スロベニア語',sq:'アルバニア語',sv:'スウェーデン語',th:'タイ語',tl:'タガログ語',tr:'トルコ語',uk:'ウクライナ語',ur:'ウルドゥー語',vi:'ベトナム語',zh:'中国語','zh-cn':'中国語','zh-hans':'中国語(簡体)','zh-tw':'中国語(繁体)','zh-hant':'中国語(繁体)'};
+function langName(c){return LANG[c.toLowerCase()]||c;}
 poll();
 </script></body></html>"""
 
