@@ -174,7 +174,7 @@ OVERLAY_HTML = """<!DOCTYPE html>
   .msg.japanese{border-left:4px solid #555}
   .meta{display:flex;align-items:center;gap:6px;margin-bottom:4px}
   .author{color:#ffe066;font-weight:bold;font-size:14px}
-  .lang-badge{font-size:11px;background:#29b6f6;color:#003;border-radius:4px;padding:1px 7px;font-weight:bold;text-shadow:none}
+  .lang-badge{font-size:11px;background:#29b6f6;color:#003;border-radius:4px;padding:1px 7px;font-weight:bold;text-shadow:none !important;display:inline-block}
   .translated-text{color:#ffffff;font-size:18px}
   .original{color:#bbb;font-size:13px;margin-top:3px}
   @keyframes fadein{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
