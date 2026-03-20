@@ -91,10 +91,27 @@ def translate_text(text, source_lang):
     return text
 
 
+import re as _re
+# 絵文字・記号のみの文字列を検出するパターン
+_EMOJI_ONLY = _re.compile(
+    r'^[\s'
+    r'\U0001F000-\U0001FFFF'  # 絵文字
+    r'\U00002600-\U000027BF'  # その他記号
+    r'\U0000FE00-\U0000FE0F'  # variation selectors
+    r'\U00002300-\U000023FF'  # 時計・矢印等
+    r'\U0001FA00-\U0001FFFF'  # 追加絵文字
+    r'！-～'                   # 全角記号
+    r']+$'
+)
+
 def detect_language(text):
-    """オフライン言語判定。短すぎる or 失敗時は None"""
-    if len(text.strip()) < MIN_CHARS:
+    """オフライン言語判定。絵文字のみ・短すぎる・失敗時は None"""
+    stripped = text.strip()
+    if len(stripped) < MIN_CHARS:
         return None
+    # 絵文字・記号のみのコメントは翻訳不要（日本語扱いにして表示だけする）
+    if _EMOJI_ONLY.match(stripped):
+        return TARGET_LANG
     try:
         return detect(text)
     except LangDetectException:
@@ -118,18 +135,19 @@ def translation_worker():
         message  = item["message"]
         lang     = item["lang"]
         imageUrl = item.get("imageUrl", "")
+        badgeUrl = item.get("badgeUrl", "")
         isMember = item.get("isMember", False)
         isMod    = item.get("isMod", False)
         isOwner  = item.get("isOwner", False)
 
         if lang == TARGET_LANG:
             entry = {"author": author, "original": message, "translated": None,
-                     "lang": lang, "imageUrl": imageUrl,
+                     "lang": lang, "imageUrl": imageUrl, "badgeUrl": badgeUrl,
                      "isMember": isMember, "isMod": isMod, "isOwner": isOwner}
         else:
             translated = translate_text(message, lang)
             entry = {"author": author, "original": message, "translated": translated,
-                     "lang": lang, "imageUrl": imageUrl,
+                     "lang": lang, "imageUrl": imageUrl, "badgeUrl": badgeUrl,
                      "isMember": isMember, "isMod": isMod, "isOwner": isOwner}
 
         with messages_lock:
@@ -163,6 +181,7 @@ def chat_worker(video_id):
                     "message":  item.message,
                     "lang":     lang,
                     "imageUrl": getattr(item.author, "imageUrl", ""),
+                    "badgeUrl": getattr(item.author, "badgeUrl", ""),
                     "isMember": getattr(item.author, "isChatSponsor", False),
                     "isMod":    getattr(item.author, "isChatModerator", False),
                     "isOwner":  getattr(item.author, "isChatOwner", False),
@@ -231,6 +250,7 @@ async function poll(){
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function avatar(m){return m.imageUrl?`<img class="avatar" src="${esc(m.imageUrl)}" onerror="this.style.display='none'">`:''}
 function badges(m){
+  if(m.badgeUrl)return`<img class="avatar" src="${esc(m.badgeUrl)}" title="バッジ" onerror="this.style.display='none'">`;
   let b='';
   if(m.isOwner)b+=`<span class="badge-owner">配信者</span>`;
   else if(m.isMod)b+=`<span class="badge-mod">モデ</span>`;

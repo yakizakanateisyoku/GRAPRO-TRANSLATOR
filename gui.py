@@ -98,7 +98,7 @@ class App(ctk.CTk):
         self._lbl_cnt.pack(side="right")
 
         # 入力ラベル
-        ctk.CTkLabel(card, text="YouTube URL または動画ID",
+        ctk.CTkLabel(card, text="YouTube 配信URL",
                      text_color="#888888", font=ctk.CTkFont("Segoe UI",12),
                      fg_color="transparent").pack(anchor="w", padx=14, pady=(10,3))
 
@@ -163,8 +163,9 @@ class App(ctk.CTk):
         ctk.CTkLabel(card, text="直近のメッセージ", text_color="#888888",
                      font=ctk.CTkFont("Segoe UI",11),
                      fg_color="transparent").pack(anchor="w", padx=14, pady=(0,4))
-        self._msg_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self._msg_frame = ctk.CTkFrame(card, fg_color="transparent", height=200)
         self._msg_frame.pack(fill="x", padx=14, pady=(0,6))
+        self._msg_frame.pack_propagate(False)
         self._lbl_empty = ctk.CTkLabel(
             self._msg_frame, text="開始するとここに表示されます",
             text_color="#bbbbbb", font=ctk.CTkFont("Segoe UI",10),
@@ -289,18 +290,29 @@ class App(ctk.CTk):
                         except: pass
                 threading.Thread(target=_load_av, daemon=True).start()
 
-            # バッジ
-            if m.get("isOwner"):
-                ctk.CTkLabel(meta, text=" 配信者 ", fg_color="#f1c40f", text_color="#000",
-                             font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(0,4))
-            elif m.get("isMod"):
-                ctk.CTkLabel(meta, text=" モデ ", fg_color="#5865f2", text_color="#fff",
-                             font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(0,4))
-            if m.get("isMember"):
-                ctk.CTkLabel(meta, text=" メンバー ", fg_color="#2ecc71", text_color="#000",
-                             font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(0,4))
+            # バッジ（画像があれば画像優先、なければテキストバッジ）
+            badge_url = m.get("badgeUrl", "")
+            if badge_url:
+                badge_lbl = ctk.CTkLabel(meta, text="", fg_color="transparent", width=18, height=18)
+                badge_lbl.pack(side="left", padx=(4,0))
+                def _load_badge(lbl=badge_lbl, url=badge_url):
+                    img = fetch_avatar(url, size=18)
+                    if img:
+                        try: lbl.configure(image=img)
+                        except: pass
+                threading.Thread(target=_load_badge, daemon=True).start()
+            else:
+                if m.get("isOwner"):
+                    ctk.CTkLabel(meta, text=" 配信者 ", fg_color="#f1c40f", text_color="#000",
+                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(4,0))
+                elif m.get("isMod"):
+                    ctk.CTkLabel(meta, text=" モデ ", fg_color="#5865f2", text_color="#fff",
+                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(4,0))
+                if m.get("isMember"):
+                    ctk.CTkLabel(meta, text=" メンバー ", fg_color="#2ecc71", text_color="#000",
+                                 font=ctk.CTkFont("Segoe UI",9,"bold"), corner_radius=3).pack(side="left", padx=(4,0))
 
-            ctk.CTkLabel(meta, text=author[:16],
+            ctk.CTkLabel(meta, text=author,
                          text_color="#444444",
                          font=ctk.CTkFont("Segoe UI",12,"bold"),
                          fg_color="transparent").pack(side="left")
@@ -312,20 +324,20 @@ class App(ctk.CTk):
                              font=ctk.CTkFont("Segoe UI",10,"bold"),
                              corner_radius=4).pack(side="left", padx=(6,0), pady=1)
 
-            disp = text if len(text) <= 30 else text[:30]+"…"
-            ctk.CTkLabel(inner, text=disp,
+            ctk.CTkLabel(inner, text=text,
                          text_color="#1a1a1a",
-                         font=ctk.CTkFont("Segoe UI",14),
+                         font=ctk.CTkFont("Segoe UI",13),
                          fg_color="transparent",
-                         anchor="w").pack(fill="x")
+                         anchor="w", justify="left",
+                         wraplength=270).pack(fill="x")
 
             if translated:
-                orig = original if len(original) <= 34 else original[:34]+"…"
-                ctk.CTkLabel(inner, text=orig,
+                ctk.CTkLabel(inner, text=original,
                              text_color="#aaaaaa",
                              font=ctk.CTkFont("Segoe UI",11),
                              fg_color="transparent",
-                             anchor="w").pack(fill="x")
+                             anchor="w", justify="left",
+                             wraplength=270).pack(fill="x")
 
             self._msg_widgets.append(outer)
 
