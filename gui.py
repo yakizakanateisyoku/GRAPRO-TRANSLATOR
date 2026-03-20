@@ -29,6 +29,19 @@ ctk.set_default_color_theme("blue")
 PORT    = translator.OVERLAY_PORT
 OBS_URL = f"http://localhost:{PORT}/"
 
+# 色定数
+CARD_BG  = "#ffffff"
+CARD_BD  = "#e0dfd6"
+BODY_BG  = "#f0efe8"
+ENTRY_BG = "#f8f7f2"
+ENTRY_BD = "#d8d7d0"
+FG1      = "#1a1a1a"
+FG2      = "#666666"
+FG3      = "#aaaaaa"
+ACC      = "#29b6f6"
+BTN_G    = "#1a936f"
+BTN_R    = "#c0392b"
+
 # 接続を再利用してTIME_WAIT枯渇を防ぐ
 SESSION = requests.Session()
 
@@ -262,16 +275,21 @@ class App(ctk.CTk):
             author     = m.get("author","")
             text       = translated if translated else original
 
-            outer = ctk.CTkFrame(self._msg_frame, fg_color="transparent")
-            outer.pack(anchor="w", pady=(0,3))
+            # tk.Frame を使うことで fill="y" が確実に機能する
+            outer = tk.Frame(self._msg_frame, bg=CARD_BG)
+            outer.pack(fill="x", pady=(0,4))
 
             border_c = "#29b6f6" if translated else "#cccccc"
-            bar = ctk.CTkFrame(outer, fg_color=border_c, width=3, corner_radius=0)
-            bar.pack(side="left", fill="y", pady=2)
-            bar.pack_propagate(False)
 
-            inner = ctk.CTkFrame(outer, fg_color="transparent", width=290)
-            inner.pack(side="left", padx=(6,0), pady=2)
+            # tk.Frame を使うことで fill="y" が確実に機能する
+            outer = tk.Frame(self._msg_frame, bg=CARD_BG)
+            outer.pack(fill="x", pady=(0,4))
+
+            bar = tk.Frame(outer, bg=border_c, width=5)
+            bar.pack(side="left", fill="y")
+
+            inner = ctk.CTkFrame(outer, fg_color="transparent", width=284)
+            inner.pack(side="left", padx=(8,0), pady=3)
             inner.pack_propagate(False)
 
             # メタ行：① アイコン → ② 名前 → ③ バッジ
