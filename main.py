@@ -20,8 +20,6 @@ import time
 import queue
 import sys
 from flask import Flask, render_template_string, jsonify
-import pytchat
-from pytchat.core.pytchat import PytchatCore
 import requests
 from langdetect import detect, LangDetectException
 
@@ -163,45 +161,146 @@ def translation_worker():
 
 # ===== チャット取得スレッド =====
 
+_YT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept-Language": "ja,en;q=0.9",
+}
+_YT_SESSION = requests.Session()
+_YT_SESSION.headers.update(_YT_HEADERS)
+
+
+def _get_initial_chat_info(video_id):
+    """動画ページからcontinuationトークンとAPIキーを取得"""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    resp = _YT_SESSION.get(url, timeout=10)
+    html = resp.text
+    # APIキー
+    m = _re.search(r'"INNERTUBE_API_KEY":"([^"]+)"', html)
+    api_key = m.group(1) if m else "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+    # continuationトークン（ライブチャット用）
+    conts = _re.findall(r'"continuation":"([^"]+)"', html)
+    if not conts:
+        return None, None
+    return api_key, conts[0]
+
+
+def _poll_live_chat(api_key, continuation):
+    """YouTube live_chat APIを1回ポーリングし (messages, next_continuation, timeout_ms) を返す"""
+    url = f"https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key={api_key}"
+    payload = {
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20260324.00.00",
+            }
+        },
+        "continuation": continuation,
+    }
+    resp = _YT_SESSION.post(url, json=payload, timeout=10)
+    data = resp.json()
+
+    messages = []
+    next_cont = None
+    timeout_ms = 5000  # デフォルト5秒
+
+    cc = data.get("continuationContents", {}).get("liveChatContinuation", {})
+
+    # 次のcontinuation & ポーリング間隔
+    for c in cc.get("continuations", []):
+        icd = c.get("invalidationContinuationData") or c.get("timedContinuationData") or c.get("reloadContinuationData")
+        if icd:
+            next_cont = icd.get("continuation", next_cont)
+            timeout_ms = icd.get("timeoutMs", timeout_ms)
+
+    # メッセージ抽出
+    for action in cc.get("actions", []):
+        item = action.get("addChatItemAction", {}).get("item", {})
+        renderer = item.get("liveChatTextMessageRenderer")
+        if not renderer:
+            continue
+        # テキスト
+        runs = renderer.get("message", {}).get("runs", [])
+        text = "".join(r.get("text", "") for r in runs)
+        if not text:
+            continue
+        # 著者情報
+        author_name = renderer.get("authorName", {}).get("simpleText", "???")
+        # アバター
+        thumbs = renderer.get("authorPhoto", {}).get("thumbnails", [])
+        image_url = thumbs[-1]["url"] if thumbs else ""
+        # バッジ
+        badge_url = ""
+        is_member = False
+        is_mod = False
+        is_owner = False
+        for badge in renderer.get("authorBadges", []):
+            br = badge.get("liveChatAuthorBadgeRenderer", {})
+            badge_type = br.get("customThumbnail")
+            if badge_type:
+                bt = badge_type.get("thumbnails", [])
+                badge_url = bt[-1]["url"] if bt else ""
+                is_member = True
+            icon_type = br.get("icon", {}).get("iconType", "")
+            if icon_type == "MODERATOR":
+                is_mod = True
+            elif icon_type == "OWNER":
+                is_owner = True
+
+        messages.append({
+            "author":   author_name,
+            "message":  text,
+            "imageUrl": image_url,
+            "badgeUrl": badge_url,
+            "isMember": is_member,
+            "isMod":    is_mod,
+            "isOwner":  is_owner,
+        })
+
+    return messages, next_cont, timeout_ms
+
+
 def chat_worker(video_id):
-    """pytchat でチャット取得 → 言語判定 → 翻訳キューへ投入"""
+    """YouTube Live Chat API で直接チャット取得 → 言語判定 → 翻訳キューへ投入"""
     print(f"[チャット開始] video_id={video_id}")
     retry = 0
-    while not stop_event.is_set():
+    while not stop_event.is_set() and retry < 5:
         try:
-            chat = PytchatCore(video_id=video_id, interruptable=False)
-            print(f"[pytchat] 接続成功 is_alive={chat.is_alive()} retry={retry}")
+            api_key, continuation = _get_initial_chat_info(video_id)
+            if not continuation:
+                print(f"[チャット] continuationトークン取得失敗 retry={retry+1}")
+                retry += 1
+                time.sleep(3)
+                continue
+            print(f"[チャット] 接続成功 retry={retry}")
             retry = 0
-            while chat.is_alive() and not stop_event.is_set():
-                data = chat.get()
-                items = list(data.sync_items())
-                for item in items:
-                    lang = detect_language(item.message)
+            while continuation and not stop_event.is_set():
+                msgs, next_cont, wait_ms = _poll_live_chat(api_key, continuation)
+                for m in msgs:
+                    lang = detect_language(m["message"])
                     if lang is None:
                         continue
-                    translation_q.put({
-                        "author":   item.author.name,
-                        "message":  item.message,
-                        "lang":     lang,
-                        "imageUrl": getattr(item.author, "imageUrl", ""),
-                        "badgeUrl": getattr(item.author, "badgeUrl", ""),
-                        "isMember": getattr(item.author, "isChatSponsor", False),
-                        "isMod":    getattr(item.author, "isChatModerator", False),
-                        "isOwner":  getattr(item.author, "isChatOwner", False),
-                    })
-                time.sleep(0.3)
-            if not stop_event.is_set():
-                print(f"[pytchat] 接続切断、3秒後に再接続 retry={retry+1}")
-                time.sleep(3)
-                retry += 1
+                    m["lang"] = lang
+                    translation_q.put(m)
+                if next_cont:
+                    continuation = next_cont
+                else:
+                    print("[チャット] continuation終了（配信終了?）")
+                    break
+                # YouTube指定の待機時間（最低0.5秒、最大10秒に制限）
+                sleep_sec = max(0.5, min(wait_ms / 1000, 10))
+                # stop_eventを細かくチェックしながら待機
+                waited = 0
+                while waited < sleep_sec and not stop_event.is_set():
+                    time.sleep(0.3)
+                    waited += 0.3
         except Exception as e:
             print(f"[チャットエラー] {e}")
             if not stop_event.is_set():
-                time.sleep(3)
                 retry += 1
-        if retry >= 5:
-            print("[pytchat] 再接続5回失敗、終了")
-            break
+                time.sleep(3)
+    if retry >= 5:
+        print("[チャット] 再接続5回失敗、終了")
     print("[チャット終了]")
 
 
