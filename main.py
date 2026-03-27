@@ -19,20 +19,32 @@ import threading
 import time
 import queue
 import sys
-from flask import Flask, render_template_string, jsonify
+import os
+import json as _json
+from flask import Flask, render_template_string, jsonify, request as flask_request
 import requests
 from langdetect import detect, LangDetectException
 
 # ===== 設定 =====
-# 公開IP経由 (MAP-E固定IP → Proxmox socat → LXC LibreTranslate)
-# 123.225.35.19:5000 → 192.168.1.11:5001 → 192.168.1.15:5000
-LIBRETRANSLATE_URL = "http://123.225.35.19:5000/translate"
-LIBRETRANSLATE_API_KEY = "c57f841d-53f3-4d83-a9ab-24288ed44413"  # 500 req/min
 OVERLAY_PORT       = 7788
 MAX_MESSAGES       = 20    # オーバーレイ表示の最大件数
 MIN_CHARS          = 3     # 翻訳する最小文字数
 TARGET_LANG        = "ja"  # 翻訳先言語
 NUM_WORKERS        = 3     # 翻訳ワーカースレッド数
+
+# ===== 翻訳エンジン設定 =====
+# "libretranslate" | "deepl"   ← 今後 "google" 等も追加可能
+TRANSLATE_ENGINE = os.environ.get("TRANSLATE_ENGINE", "deepl")
+
+# --- LibreTranslate ---
+# 公開IP経由 (MAP-E固定IP → Proxmox socat → LXC LibreTranslate)
+LIBRETRANSLATE_URL     = "https://lt.f1234k.com/translate"
+LIBRETRANSLATE_API_KEY = "47fcc4e7-6a4b-43e3-967b-c60c5438f8d3"
+
+# --- DeepL ---
+DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "REDACTED_DEEPL_KEY")
+# Free版: api-free.deepl.com / Pro版: api.deepl.com
+DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
 
 # 言語コード → 日本語表示名
 LANG_NAMES = {
@@ -72,20 +84,109 @@ worker_threads  = []
 
 app = Flask(__name__)
 
+# ===== オーバーレイ設定（サーバー側永続化） =====
+_SETTINGS_FILE = "overlay_settings.json"
+_DEFAULT_SETTINGS = {
+    "bodyBg":        "transparent",
+    "msgBg":         "rgba(0,0,0,0.88)",
+    "accentTranslated": "#29b6f6",
+    "accentJapanese":   "#555555",
+    "authorColor":   "#ffe066",
+    "authorFont":    "Meiryo, Noto Sans JP, sans-serif",
+    "authorSize":    "14",
+    "textColor":     "#ffffff",
+    "textFont":      "Meiryo, Noto Sans JP, sans-serif",
+    "textSize":      "18",
+    "originalColor": "#bbbbbb",
+    "count":         "5",
+}
+_overlay_settings = dict(_DEFAULT_SETTINGS)
+
+def _load_settings():
+    global _overlay_settings
+    try:
+        import os
+        if os.path.exists(_SETTINGS_FILE):
+            with open(_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                saved = _json.load(f)
+            _overlay_settings = {**_DEFAULT_SETTINGS, **saved}
+    except Exception as e:
+        print(f"[設定読込エラー] {e}")
+
+def _save_settings():
+    try:
+        with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            _json.dump(_overlay_settings, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[設定保存エラー] {e}")
+
+_load_settings()
+
 
 # ===== 翻訳・言語判定 =====
 
+# --- DeepL 言語コード変換 ---
+# langdetect → DeepL ソース言語コード
+_DEEPL_SOURCE_MAP = {
+    "zh-cn": "ZH", "zh-tw": "ZH", "zh": "ZH",
+    "en": "EN", "ja": "JA", "ko": "KO", "de": "DE", "fr": "FR",
+    "es": "ES", "pt": "PT", "pt-br": "PT", "it": "IT", "nl": "NL",
+    "pl": "PL", "ru": "RU", "bg": "BG", "cs": "CS", "da": "DA",
+    "el": "EL", "et": "ET", "fi": "FI", "hu": "HU", "id": "ID",
+    "lv": "LV", "lt": "LT", "nb": "NB", "ro": "RO", "sk": "SK",
+    "sl": "SL", "sv": "SV", "tr": "TR", "uk": "UK", "ar": "AR",
+}
+# DeepL ターゲット言語コード（ターゲットは地域付きが必要な場合あり）
+_DEEPL_TARGET_MAP = {
+    "ja": "JA", "en": "EN-US", "zh": "ZH-HANS",
+    "pt": "PT-PT", "pt-br": "PT-BR",
+}
+
+
+def _translate_libretranslate(text, source_lang):
+    """LibreTranslate で翻訳"""
+    resp = requests.post(LIBRETRANSLATE_URL, json={
+        "q": text, "source": source_lang, "target": TARGET_LANG, "format": "text",
+        "api_key": LIBRETRANSLATE_API_KEY,
+    }, timeout=5)
+    if resp.status_code == 200:
+        return resp.json().get("translatedText", text)
+    return text
+
+
+def _translate_deepl(text, source_lang):
+    """DeepL API で翻訳"""
+    src = _DEEPL_SOURCE_MAP.get(source_lang, source_lang.upper())
+    tgt = _DEEPL_TARGET_MAP.get(TARGET_LANG, TARGET_LANG.upper())
+    resp = requests.post(DEEPL_API_URL, data={
+        "auth_key": DEEPL_API_KEY,
+        "text": text,
+        "source_lang": src,
+        "target_lang": tgt,
+    }, timeout=5)
+    if resp.status_code == 200:
+        translations = resp.json().get("translations", [])
+        if translations:
+            return translations[0].get("text", text)
+    else:
+        print(f"[DeepL] HTTP {resp.status_code}: {resp.text[:200]}")
+    return text
+
+
+# エンジン名 → 翻訳関数のマッピング
+_ENGINES = {
+    "libretranslate": _translate_libretranslate,
+    "deepl":          _translate_deepl,
+}
+
+
 def translate_text(text, source_lang):
-    """LibreTranslate で翻訳。失敗時は原文を返す"""
+    """設定されたエンジンで翻訳。失敗時は原文を返す"""
+    engine_fn = _ENGINES.get(TRANSLATE_ENGINE, _translate_libretranslate)
     try:
-        resp = requests.post(LIBRETRANSLATE_URL, json={
-            "q": text, "source": source_lang, "target": TARGET_LANG, "format": "text",
-            "api_key": LIBRETRANSLATE_API_KEY,
-        }, timeout=5)
-        if resp.status_code == 200:
-            return resp.json().get("translatedText", text)
+        return engine_fn(text, source_lang)
     except Exception as e:
-        print(f"[翻訳エラー] {e}")
+        print(f"[翻訳エラー][{TRANSLATE_ENGINE}] {e}")
     return text
 
 
@@ -316,42 +417,247 @@ def start_workers():
 
 
 # ===== OBS オーバーレイ HTML =====
-OVERLAY_HTML = """<!DOCTYPE html>
+OVERLAY_HTML = r"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
+  :root{
+    --body-bg:transparent;
+    --msg-bg:rgba(0,0,0,0.88);
+    --accent-translated:#29b6f6;
+    --accent-japanese:#555;
+    --author-color:#ffe066;
+    --author-font:'Meiryo','Noto Sans JP',sans-serif;
+    --author-size:14px;
+    --text-color:#ffffff;
+    --text-font:'Meiryo','Noto Sans JP',sans-serif;
+    --text-size:18px;
+    --original-color:#bbb;
+  }
   *{margin:0;padding:0;box-sizing:border-box}
-  body{background:transparent;font-family:'Meiryo','Noto Sans JP',sans-serif;overflow:hidden}
+  body{background:var(--body-bg);font-family:var(--text-font);overflow-x:hidden}
   #messages{position:fixed;bottom:16px;left:16px;right:16px;display:flex;flex-direction:column-reverse;gap:6px;max-height:90vh;overflow:hidden}
-  .msg{background:rgba(0,0,0,0.88);border-radius:8px;padding:8px 14px;color:#ffffff;font-size:18px;line-height:1.6;animation:fadein 0.35s ease;word-break:break-word;text-shadow:0 1px 3px rgba(0,0,0,0.8)}
-  .msg.translated{border-left:4px solid #29b6f6}
-  .msg.japanese{border-left:4px solid #555}
+  .msg{background:var(--msg-bg);border-radius:8px;padding:8px 14px;color:var(--text-color);font-family:var(--text-font);font-size:var(--text-size);line-height:1.6;animation:fadein 0.35s ease;word-break:break-word;text-shadow:0 1px 3px rgba(0,0,0,0.8)}
+  .msg.translated{border-left:4px solid var(--accent-translated)}
+  .msg.japanese{border-left:4px solid var(--accent-japanese)}
   .meta{display:flex;align-items:center;gap:6px;margin-bottom:4px}
   .avatar{width:22px;height:22px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1px solid rgba(255,255,255,0.3)}
-  .author{color:#ffe066;font-weight:bold;font-size:14px}
-  .lang-badge{font-size:11px;background:#29b6f6;color:#003;border-radius:4px;padding:1px 7px;font-weight:bold;text-shadow:none !important;display:inline-block}
+  .author{color:var(--author-color);font-family:var(--author-font);font-weight:bold;font-size:var(--author-size)}
+  .lang-badge{font-size:11px;background:var(--accent-translated);color:#003;border-radius:4px;padding:1px 7px;font-weight:bold;text-shadow:none !important;display:inline-block}
   .badge-member{font-size:10px;background:#2ecc71;color:#000;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
   .badge-mod{font-size:10px;background:#5865f2;color:#fff;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
   .badge-owner{font-size:10px;background:#f1c40f;color:#000;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
-  .translated-text{color:#ffffff;font-size:18px}
-  .original{color:#bbb;font-size:13px;margin-top:3px}
+  .translated-text{color:var(--text-color);font-family:var(--text-font);font-size:var(--text-size)}
+  .original{color:var(--original-color);font-size:13px;margin-top:3px}
   @keyframes fadein{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  #gear{position:fixed;top:8px;right:8px;width:32px;height:32px;background:rgba(60,60,60,0.7);border:none;border-radius:50%;color:#ccc;font-size:18px;cursor:pointer;z-index:1000;display:flex;align-items:center;justify-content:center;transition:background 0.2s,transform 0.3s}
+  #gear:hover{background:rgba(100,100,100,0.9);transform:rotate(45deg)}
+  #panel{display:none;position:fixed;top:0;right:0;width:320px;height:100vh;background:rgba(20,20,25,0.96);z-index:999;overflow-y:auto;padding:16px;color:#ddd;font-family:'Meiryo','Noto Sans JP',sans-serif;font-size:13px;border-left:1px solid #333}
+  #panel.open{display:block}
+  #panel h3{color:#fff;font-size:15px;margin:0 0 12px;border-bottom:1px solid #444;padding-bottom:6px}
+  .sgroup{margin-bottom:14px}
+  .sgroup label{display:block;color:#aaa;font-size:12px;margin-bottom:3px}
+  .sgroup input[type=color]{width:40px;height:28px;border:1px solid #555;background:#222;cursor:pointer;vertical-align:middle}
+  .sgroup input[type=range]{width:120px;vertical-align:middle}
+  .sgroup select{background:#222;color:#ddd;border:1px solid #555;padding:3px 6px;font-size:12px}
+  .sgroup .val{color:#888;font-size:11px;margin-left:4px}
+  .srow{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  #panel .btn-row{display:flex;gap:8px;margin-top:12px}
+  #panel button{background:#333;color:#ccc;border:1px solid #555;border-radius:4px;padding:5px 14px;font-size:12px;cursor:pointer}
+  #panel button:hover{background:#444}
+  #panel button.primary{background:#29b6f6;color:#000;border-color:#29b6f6}
+  #panel button.primary:hover{background:#4fc3f7}
 </style></head><body>
+<button id="gear" title="設定">&#9881;</button>
+<div id="panel">
+  <h3>&#9881; オーバーレイ設定</h3>
+  <div class="sgroup">
+    <label>背景色（ブラウザ全体）</label>
+    <div class="srow"><input type="color" id="s_bodyBg" value="#000000"><input type="text" id="s_bodyBgText" value="transparent" style="background:#222;color:#ddd;border:1px solid #555;width:130px;padding:2px 4px;font-size:12px"> <span class="val">※ "transparent" で透過</span></div>
+  </div>
+  <div class="sgroup">
+    <label>コメント背景色</label>
+    <div class="srow"><input type="color" id="s_msgBg" value="#000000"><input type="text" id="s_msgBgText" value="rgba(0,0,0,0.88)" style="background:#222;color:#ddd;border:1px solid #555;width:160px;padding:2px 4px;font-size:12px"></div>
+  </div>
+  <div class="sgroup">
+    <label>アクセント（翻訳済み）</label>
+    <div class="srow"><input type="color" id="s_accentTranslated" value="#29b6f6"></div>
+  </div>
+  <div class="sgroup">
+    <label>アクセント（日本語）</label>
+    <div class="srow"><input type="color" id="s_accentJapanese" value="#555555"></div>
+  </div>
+  <div class="sgroup">
+    <label>リスナー名 色</label>
+    <div class="srow"><input type="color" id="s_authorColor" value="#ffe066"></div>
+  </div>
+  <div class="sgroup">
+    <label>リスナー名 フォント</label>
+    <div class="srow"><select id="s_authorFont">
+      <option value="Meiryo, Noto Sans JP, sans-serif">メイリオ</option>
+      <option value="Yu Gothic, sans-serif">游ゴシック</option>
+      <option value="Noto Sans JP, sans-serif">Noto Sans JP</option>
+      <option value="MS Gothic, monospace">MS ゴシック</option>
+      <option value="BIZ UDGothic, sans-serif">BIZ UDゴシック</option>
+      <option value="Arial, sans-serif">Arial</option>
+      <option value="Segoe UI, sans-serif">Segoe UI</option>
+    </select></div>
+  </div>
+  <div class="sgroup">
+    <label>リスナー名 サイズ</label>
+    <div class="srow"><input type="range" id="s_authorSize" min="10" max="30" value="14"><span class="val" id="v_authorSize">14px</span></div>
+  </div>
+  <div class="sgroup">
+    <label>コメント文字色</label>
+    <div class="srow"><input type="color" id="s_textColor" value="#ffffff"></div>
+  </div>
+  <div class="sgroup">
+    <label>コメント フォント</label>
+    <div class="srow"><select id="s_textFont">
+      <option value="Meiryo, Noto Sans JP, sans-serif">メイリオ</option>
+      <option value="Yu Gothic, sans-serif">游ゴシック</option>
+      <option value="Noto Sans JP, sans-serif">Noto Sans JP</option>
+      <option value="MS Gothic, monospace">MS ゴシック</option>
+      <option value="BIZ UDGothic, sans-serif">BIZ UDゴシック</option>
+      <option value="Arial, sans-serif">Arial</option>
+      <option value="Segoe UI, sans-serif">Segoe UI</option>
+    </select></div>
+  </div>
+  <div class="sgroup">
+    <label>コメント サイズ</label>
+    <div class="srow"><input type="range" id="s_textSize" min="12" max="36" value="18"><span class="val" id="v_textSize">18px</span></div>
+  </div>
+  <div class="sgroup">
+    <label>原文の色</label>
+    <div class="srow"><input type="color" id="s_originalColor" value="#bbbbbb"></div>
+  </div>
+  <div class="sgroup">
+    <label>表示件数</label>
+    <div class="srow"><input type="range" id="s_count" min="1" max="20" value="5"><span class="val" id="v_count">5</span></div>
+  </div>
+  <div class="btn-row">
+    <button class="primary" id="btnSave">保存</button>
+    <button id="btnReset">リセット</button>
+    <button id="btnClose">閉じる</button>
+  </div>
+</div>
 <div id="messages"></div>
 <script>
-const maxShow=parseInt(new URLSearchParams(location.search).get('count')||'10',10);
-let lastKey='';
+const R=document.documentElement.style;
+function applyCSS(s){
+  R.setProperty('--body-bg',s.bodyBg||'transparent');
+  R.setProperty('--msg-bg',s.msgBg||'rgba(0,0,0,0.88)');
+  R.setProperty('--accent-translated',s.accentTranslated||'#29b6f6');
+  R.setProperty('--accent-japanese',s.accentJapanese||'#555');
+  R.setProperty('--author-color',s.authorColor||'#ffe066');
+  R.setProperty('--author-font',s.authorFont||"'Meiryo','Noto Sans JP',sans-serif");
+  R.setProperty('--author-size',(s.authorSize||14)+'px');
+  R.setProperty('--text-color',s.textColor||'#ffffff');
+  R.setProperty('--text-font',s.textFont||"'Meiryo','Noto Sans JP',sans-serif");
+  R.setProperty('--text-size',(s.textSize||18)+'px');
+  R.setProperty('--original-color',s.originalColor||'#bbb');
+}
+function fillForm(s){
+  document.getElementById('s_bodyBgText').value=s.bodyBg||'transparent';
+  document.getElementById('s_msgBgText').value=s.msgBg||'rgba(0,0,0,0.88)';
+  document.getElementById('s_accentTranslated').value=toHex(s.accentTranslated||'#29b6f6');
+  document.getElementById('s_accentJapanese').value=toHex(s.accentJapanese||'#555555');
+  document.getElementById('s_authorColor').value=toHex(s.authorColor||'#ffe066');
+  document.getElementById('s_authorFont').value=s.authorFont||'Meiryo, Noto Sans JP, sans-serif';
+  document.getElementById('s_authorSize').value=s.authorSize||14;
+  document.getElementById('v_authorSize').textContent=(s.authorSize||14)+'px';
+  document.getElementById('s_textColor').value=toHex(s.textColor||'#ffffff');
+  document.getElementById('s_textFont').value=s.textFont||'Meiryo, Noto Sans JP, sans-serif';
+  document.getElementById('s_textSize').value=s.textSize||18;
+  document.getElementById('v_textSize').textContent=(s.textSize||18)+'px';
+  document.getElementById('s_originalColor').value=toHex(s.originalColor||'#bbbbbb');
+  document.getElementById('s_count').value=s.count||5;
+  document.getElementById('v_count').textContent=s.count||5;
+}
+function toHex(c){
+  if(/^#[0-9a-f]{6}$/i.test(c))return c;
+  if(/^#[0-9a-f]{3}$/i.test(c))return '#'+c[1]+c[1]+c[2]+c[2]+c[3]+c[3];
+  const d=document.createElement('div');d.style.color=c;document.body.appendChild(d);
+  const m=getComputedStyle(d).color.match(/\d+/g);d.remove();
+  if(!m)return'#000000';
+  return'#'+m.slice(0,3).map(x=>(+x).toString(16).padStart(2,'0')).join('');
+}
+function readForm(){
+  return{
+    bodyBg:document.getElementById('s_bodyBgText').value.trim()||'transparent',
+    msgBg:document.getElementById('s_msgBgText').value.trim()||'rgba(0,0,0,0.88)',
+    accentTranslated:document.getElementById('s_accentTranslated').value,
+    accentJapanese:document.getElementById('s_accentJapanese').value,
+    authorColor:document.getElementById('s_authorColor').value,
+    authorFont:document.getElementById('s_authorFont').value,
+    authorSize:document.getElementById('s_authorSize').value,
+    textColor:document.getElementById('s_textColor').value,
+    textFont:document.getElementById('s_textFont').value,
+    textSize:document.getElementById('s_textSize').value,
+    originalColor:document.getElementById('s_originalColor').value,
+    count:document.getElementById('s_count').value,
+  };
+}
+function liveUpdate(){applyCSS(readForm());}
+document.querySelectorAll('#panel input, #panel select').forEach(el=>{
+  el.addEventListener('input',()=>{
+    if(el.id==='s_authorSize')document.getElementById('v_authorSize').textContent=el.value+'px';
+    if(el.id==='s_textSize')document.getElementById('v_textSize').textContent=el.value+'px';
+    if(el.id==='s_count'){document.getElementById('v_count').textContent=el.value;maxShow=+el.value;}
+    liveUpdate();
+  });
+});
+const panel=document.getElementById('panel');
+document.getElementById('gear').addEventListener('click',()=>panel.classList.toggle('open'));
+document.getElementById('btnClose').addEventListener('click',()=>panel.classList.remove('open'));
+document.getElementById('btnSave').addEventListener('click',async()=>{
+  const s=readForm();
+  try{
+    await fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(s)});
+    document.getElementById('btnSave').textContent='\u4fdd\u5b58\u3057\u307e\u3057\u305f!';
+    setTimeout(()=>document.getElementById('btnSave').textContent='\u4fdd\u5b58',1500);
+  }catch(e){alert('\u4fdd\u5b58\u5931\u6557: '+e);}
+});
+const DEFAULTS={bodyBg:'transparent',msgBg:'rgba(0,0,0,0.88)',accentTranslated:'#29b6f6',accentJapanese:'#555555',authorColor:'#ffe066',authorFont:'Meiryo, Noto Sans JP, sans-serif',authorSize:'14',textColor:'#ffffff',textFont:'Meiryo, Noto Sans JP, sans-serif',textSize:'18',originalColor:'#bbbbbb',count:'5'};
+document.getElementById('btnReset').addEventListener('click',()=>{fillForm(DEFAULTS);applyCSS(DEFAULTS);});
+async function initSettings(){
+  try{
+    const r=await fetch('/settings');
+    const s=await r.json();
+    applyCSS(s);fillForm(s);maxShow=+(s.count||5);
+  }catch(e){applyCSS(DEFAULTS);fillForm(DEFAULTS);}
+}
+initSettings();
+let maxShow=5;
+const box=document.getElementById('messages');
+const liveEls=new Map();
+function msgKey(m){return m.author+'\0'+m.original;}
+function mkEl(m){
+  const a=esc(m.author),o=esc(m.original);
+  const d=document.createElement('div');
+  d.className=m.translated?'msg translated':'msg japanese';
+  if(m.translated){
+    d.innerHTML=`<div class="meta">${avatar(m)}${badges(m)}<span class="author">${a}</span><span class="lang-badge">${langName(m.lang)}</span></div><div class="translated-text">${esc(m.translated)}</div><div class="original">${o}</div>`;
+  }else{
+    d.innerHTML=`<div class="meta">${avatar(m)}${badges(m)}<span class="author">${a}</span></div><div class="translated-text">${o}</div>`;
+  }
+  return d;
+}
 async function poll(){
   try{
     const res=await fetch('/messages');
     const data=await res.json();
     const show=data.slice(0,maxShow);
-    const key=show.map(m=>m.author+m.original).join('|');
-    if(key!==lastKey){
-      lastKey=key;
-      document.getElementById('messages').innerHTML=show.map(m=>{
-        const a=esc(m.author),o=esc(m.original);
-        if(m.translated)return`<div class="msg translated"><div class="meta">${avatar(m)}${badges(m)}<span class="author">${a}</span><span class="lang-badge">${langName(m.lang)}</span></div><div class="translated-text">${esc(m.translated)}</div><div class="original">${o}</div></div>`;
-        return`<div class="msg japanese"><div class="meta">${avatar(m)}${badges(m)}<span class="author">${a}</span></div><div class="translated-text">${o}</div></div>`;
-      }).join('');
+    const newKeys=show.map(msgKey);
+    const newSet=new Set(newKeys);
+    for(const[k,el]of liveEls){if(!newSet.has(k)){el.remove();liveEls.delete(k);}}
+    for(let i=0;i<show.length;i++){
+      const k=newKeys[i];
+      if(!liveEls.has(k)){
+        const el=mkEl(show[i]);
+        liveEls.set(k,el);
+      }
+      const el=liveEls.get(k);
+      const cur=box.children[i];
+      if(cur!==el){box.insertBefore(el,cur||null);}
     }
   }catch(e){}
   setTimeout(poll,1000);
@@ -377,6 +683,16 @@ poll();
 @app.route('/')
 def index():
     return render_template_string(OVERLAY_HTML)
+
+@app.route('/settings', methods=['GET', 'POST'])
+def overlay_settings():
+    global _overlay_settings
+    if flask_request.method == 'POST':
+        data = flask_request.get_json(force=True)
+        _overlay_settings.update(data)
+        _save_settings()
+        return jsonify({"status": "ok"})
+    return jsonify(_overlay_settings)
 
 @app.route('/messages')
 def get_messages():
@@ -414,6 +730,7 @@ def status():
         "message_count": count,
         "queue_size": translation_q.qsize(),
         "workers": NUM_WORKERS,
+        "engine": TRANSLATE_ENGINE,
     })
 
 @app.route('/test')
@@ -434,29 +751,25 @@ def test_inject():
 
 @app.route('/lt_check')
 def lt_check():
-    """LibreTranslate 疎通確認"""
+    """翻訳エンジン疎通確認（エンジン問わず "Hello world" を翻訳してみる）"""
     try:
-        resp = requests.post(LIBRETRANSLATE_URL, json={
-            "q": "Hello world", "source": "en", "target": "ja", "format": "text",
-            "api_key": LIBRETRANSLATE_API_KEY,
-        }, timeout=5)
-        if resp.status_code == 200:
-            return jsonify({"status": "ok", "result": resp.json().get("translatedText", "")})
-        return jsonify({"status": "error", "code": resp.status_code})
+        result = translate_text("Hello world", "en")
+        return jsonify({"status": "ok", "engine": TRANSLATE_ENGINE, "result": result})
     except Exception as e:
-        return jsonify({"status": "unreachable", "error": str(e)})
+        return jsonify({"status": "unreachable", "engine": TRANSLATE_ENGINE, "error": str(e)})
 
 
 # ===== エントリーポイント =====
 if __name__ == '__main__':
     print("=" * 50)
     print("OBS YouTube 翻訳ツール")
+    print(f"翻訳エンジン  : {TRANSLATE_ENGINE}")
     print(f"オーバーレイ  : http://localhost:{OVERLAY_PORT}/")
     print(f"チャット開始  : http://localhost:{OVERLAY_PORT}/start/<video_id>")
     print(f"停止          : http://localhost:{OVERLAY_PORT}/stop")
     print(f"ステータス    : http://localhost:{OVERLAY_PORT}/status")
     print(f"UIテスト      : http://localhost:{OVERLAY_PORT}/test")
-    print(f"LT疎通確認    : http://localhost:{OVERLAY_PORT}/lt_check")
+    print(f"疎通確認      : http://localhost:{OVERLAY_PORT}/lt_check")
     print("=" * 50)
 
     # ワーカー起動
