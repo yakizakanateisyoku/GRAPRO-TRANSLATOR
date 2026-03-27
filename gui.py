@@ -83,8 +83,8 @@ class App(ctk.CTk):
         self.resizable(False, False)
         self.geometry("360x600")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._msg_widgets = []
-        self._last_msg_key = ""
+        self._slots = []       # 永続メッセージスロット
+        self._slot_keys = []   # 各スロットの現在のキー
         self._ph_active = True
         self._build()
         self._poll()
@@ -169,9 +169,10 @@ class App(ctk.CTk):
                      fg_color="transparent").pack(anchor="w", padx=12, pady=(8,2))
         url_row = ctk.CTkFrame(url_card, fg_color="transparent")
         url_row.pack(fill="x", padx=12, pady=(0,8))
-        ctk.CTkLabel(url_row, text=OBS_URL, text_color="#29b6f6",
-                     font=ctk.CTkFont("Consolas",12),
-                     fg_color="transparent").pack(side="left")
+        self._lbl_obs_url = ctk.CTkLabel(url_row, text=OBS_URL,
+                     text_color="#29b6f6", font=ctk.CTkFont("Consolas",11),
+                     fg_color="transparent")
+        self._lbl_obs_url.pack(side="left")
         self._btn_copy = ctk.CTkButton(
             url_row, text="開く", fg_color="#ffffff",
             hover_color="#f0efe8", text_color="#555555",
@@ -179,6 +180,25 @@ class App(ctk.CTk):
             border_color="#d0cfc8", height=26, width=62, corner_radius=5,
             command=self._open_url)
         self._btn_copy.pack(side="right")
+
+        # ── 翻訳エンジン選択 ──
+        eng_frame = ctk.CTkFrame(card, fg_color="transparent")
+        eng_frame.pack(fill="x", padx=14, pady=(0,10))
+        ctk.CTkLabel(eng_frame, text="翻訳エンジン",
+                     text_color="#888888", font=ctk.CTkFont("Noto Serif JP",11),
+                     fg_color="transparent").pack(side="left", padx=(0,8))
+        self._engine_var = ctk.StringVar(value=translator.TRANSLATE_ENGINE)
+        self._engine_menu = ctk.CTkOptionMenu(
+            eng_frame, variable=self._engine_var,
+            values=["deepl", "azure", "libretranslate"],
+            fg_color="#ffffff", button_color="#e0dfd6",
+            button_hover_color="#d0cfc8", text_color="#333333",
+            dropdown_fg_color="#ffffff", dropdown_text_color="#333333",
+            dropdown_hover_color="#f0faf5",
+            font=ctk.CTkFont("Noto Serif JP",12),
+            height=30, width=160, corner_radius=6,
+            command=self._change_engine)
+        self._engine_menu.pack(side="left")
 
         # ── 直近のメッセージ ──
         # 直近のメッセージ（クリックで折りたたみ）
@@ -200,6 +220,45 @@ class App(ctk.CTk):
             text_color="#bbbbbb", font=ctk.CTkFont("Noto Serif JP",10),
             fg_color="transparent")
         self._lbl_empty.pack(pady=10)
+        # 5スロット永続生成（ブラウザ風ダークカード）
+        MSG_BG = "#1a1a1a"
+        for _ in range(5):
+            slot = {}
+            f = tk.Frame(self._msg_frame, bg=MSG_BG, highlightthickness=0)
+            border = tk.Frame(f, bg="#555555", width=4)
+            border.pack(side="left", fill="y")
+            slot["border"] = border
+            inner = tk.Frame(f, bg=MSG_BG, padx=8, pady=6)
+            inner.pack(side="left", fill="x", expand=True)
+            meta = tk.Frame(inner, bg=MSG_BG)
+            meta.pack(fill="x")
+            av = ctk.CTkLabel(meta, text="", fg_color="transparent", width=22, height=22)
+            av.pack(side="left", padx=(0,5))
+            slot["avatar"] = av
+            slot["_av_url"] = ""
+            author = ctk.CTkLabel(meta, text="", text_color="#ffe066",
+                                   font=ctk.CTkFont("Noto Serif JP",11,"bold"),
+                                   fg_color="transparent")
+            author.pack(side="left")
+            slot["author"] = author
+            lang_b = ctk.CTkLabel(meta, text="", fg_color=ACC, text_color="#003",
+                                   font=ctk.CTkFont("Noto Serif JP",9,"bold"),
+                                   corner_radius=4)
+            slot["lang_badge"] = lang_b
+            text_lbl = ctk.CTkLabel(inner, text="", text_color="#ffffff",
+                                     font=ctk.CTkFont("Noto Serif JP",13),
+                                     fg_color="transparent", anchor="w",
+                                     justify="left", wraplength=280)
+            text_lbl.pack(fill="x", pady=(2,0))
+            slot["text"] = text_lbl
+            orig_lbl = ctk.CTkLabel(inner, text="", text_color="#999999",
+                                     font=ctk.CTkFont("Noto Serif JP",10),
+                                     fg_color="transparent", anchor="w",
+                                     justify="left", wraplength=280)
+            slot["original"] = orig_lbl
+            slot["frame"] = f
+            self._slots.append(slot)
+            self._slot_keys.append(None)
 
         # フッター
         # フッター（pack順序の基準点として使用）
@@ -207,6 +266,11 @@ class App(ctk.CTk):
         self._footer_frame.pack(pady=(4,8))
 
     # ── ボタンコールバック ──
+    def _change_engine(self, choice):
+        """翻訳エンジンを動的に切り替え"""
+        translator.TRANSLATE_ENGINE = choice
+        self._check_lt()  # 疎通確認を再実行
+
     def _toggle_msgs(self, _=None):
         self._msg_visible = not self._msg_visible
         if self._msg_visible:
@@ -284,98 +348,70 @@ class App(ctk.CTk):
         self._btn_copy.configure(text="✓ 開いた", text_color="#1a936f")
         self.after(1500, lambda: self._btn_copy.configure(text="開く", text_color="#555555"))
 
-    # ── メッセージ描画（ブラウザプレビュー準拠）──
+    # ── メッセージ描画（永続スロット方式・ちらつきゼロ）──
     def _render_msgs(self, msgs):
-        # 差分がなければ再描画しない（ちらつき防止）
-        key = "|".join(f"{m.get('author','')}:{m.get('original','')[:20]}" for m in msgs[:5])
-        if key == self._last_msg_key:
+        show = msgs[:5]
+        if not show:
+            for i in range(5):
+                self._slots[i]["frame"].pack_forget()
+                self._slot_keys[i] = None
+            self._lbl_empty.pack(pady=10)
             return
-        self._last_msg_key = key
-
-        for w in self._msg_widgets: w.destroy()
-        self._msg_widgets = []
-        if not msgs:
-            self._lbl_empty.pack(pady=10); return
         self._lbl_empty.pack_forget()
 
-        for m in msgs[:5]:
-            lang       = m.get("lang","")
-            lang_label = LANG.get(lang.lower(), lang)
-            translated = m.get("translated")
-            original   = m.get("original","")
-            author     = m.get("author","")
-            text       = translated if translated else original
-
-            outer = tk.Frame(self._msg_frame, bg=CARD_BG)
-            outer.pack(fill="x", pady=(0,8))
-
-            # 左：アバター（28px丸）
-            av_col = tk.Frame(outer, bg=CARD_BG, width=36)
-            av_col.pack(side="left", anchor="n", padx=(0,8), pady=(2,0))
-            av_col.pack_propagate(False)
-            av_label = ctk.CTkLabel(av_col, text="", fg_color="transparent",
-                                    width=28, height=28)
-            av_label.pack()
-            if m.get("imageUrl"):
-                def _load_av(lbl=av_label, url=m["imageUrl"]):
-                    img = fetch_avatar(url, size=28)
-                    if img:
-                        try: lbl.configure(image=img, text="")
-                        except: pass
-                threading.Thread(target=_load_av, daemon=True).start()
-
-            # 右：名前・バッジ・テキスト
-            right = tk.Frame(outer, bg=CARD_BG)
-            right.pack(side="left", fill="x", expand=True)
-
-            # 名前 + バッジ
-            meta = tk.Frame(right, bg=CARD_BG)
-            meta.pack(fill="x")
-            ctk.CTkLabel(meta, text=author, text_color="#333333",
-                         font=ctk.CTkFont("Noto Serif JP",11,"bold"),
-                         fg_color="transparent").pack(side="left")
-            if m.get("badgeUrl"):
-                bl = ctk.CTkLabel(meta, text="", fg_color="transparent",
-                                  width=16, height=16)
-                bl.pack(side="left", padx=(4,0))
-                def _load_b(lbl=bl, url=m["badgeUrl"]):
-                    img = fetch_avatar(url, size=16)
-                    if img:
-                        try: lbl.configure(image=img)
-                        except: pass
-                threading.Thread(target=_load_b, daemon=True).start()
-            elif m.get("isOwner"):
-                ctk.CTkLabel(meta, text=" 配信者 ", fg_color="#f1c40f",
-                             text_color="#000", font=ctk.CTkFont("Noto Serif JP",8,"bold"),
-                             corner_radius=3).pack(side="left", padx=(4,0))
-            elif m.get("isMod"):
-                ctk.CTkLabel(meta, text=" モデ ", fg_color="#5865f2",
-                             text_color="#fff", font=ctk.CTkFont("Noto Serif JP",8,"bold"),
-                             corner_radius=3).pack(side="left", padx=(4,0))
-            if m.get("isMember") and not m.get("badgeUrl"):
-                ctk.CTkLabel(meta, text=" メンバー ", fg_color="#2ecc71",
-                             text_color="#000", font=ctk.CTkFont("Noto Serif JP",8,"bold"),
-                             corner_radius=3).pack(side="left", padx=(4,0))
-
-            # 言語バッジ（翻訳時のみ）+ テキスト
-            txt_row = tk.Frame(right, bg=CARD_BG)
-            txt_row.pack(fill="x", pady=(1,0))
-            if translated:
-                ctk.CTkLabel(txt_row, text=f" {lang_label} ",
-                             fg_color=ACC, text_color="#000",
-                             font=ctk.CTkFont("Noto Serif JP",9,"bold"),
-                             corner_radius=4).pack(side="left", padx=(0,5))
-            ctk.CTkLabel(txt_row, text=text, text_color=FG1,
-                         font=ctk.CTkFont("Noto Serif JP",13), fg_color="transparent",
-                         anchor="w", justify="left", wraplength=255).pack(side="left")
-
-            # 原文（翻訳時のみ・薄グレー）
-            if translated:
-                ctk.CTkLabel(right, text=original, text_color="#888888",
-                             font=ctk.CTkFont("Noto Serif JP",10), fg_color="transparent",
-                             anchor="w", justify="left", wraplength=280).pack(fill="x")
-
-            self._msg_widgets.append(outer)
+        for i in range(5):
+            slot = self._slots[i]
+            if i < len(show):
+                m = show[i]
+                key = f"{m.get('author','')}\\0{m.get('original','')}"
+                if key == self._slot_keys[i]:
+                    # 内容同じ → 何もしない
+                    if not slot["frame"].winfo_ismapped():
+                        slot["frame"].pack(fill="x", pady=(0,4))
+                    continue
+                self._slot_keys[i] = key
+                # スロット内容を更新（widget再生成なし）
+                translated = m.get("translated")
+                original   = m.get("original","")
+                author     = m.get("author","")
+                lang       = m.get("lang","")
+                lang_label = LANG.get(lang.lower(), lang)
+                text       = translated if translated else original
+                # ボーダー色
+                border_color = ACC if translated else "#555555"
+                slot["border"].configure(bg=border_color)
+                # 著者名
+                slot["author"].configure(text=author)
+                # アバター（URLが変わった時だけ再取得）
+                img_url = m.get("imageUrl","")
+                if img_url and img_url != slot["_av_url"]:
+                    slot["_av_url"] = img_url
+                    def _load(lbl=slot["avatar"], url=img_url):
+                        img = fetch_avatar(url, size=22)
+                        if img:
+                            try: lbl.configure(image=img, text="")
+                            except: pass
+                    threading.Thread(target=_load, daemon=True).start()
+                # 言語バッジ
+                if translated:
+                    slot["lang_badge"].configure(text=f" {lang_label} ")
+                    slot["lang_badge"].pack(side="left", padx=(6,0))
+                else:
+                    slot["lang_badge"].pack_forget()
+                # テキスト
+                slot["text"].configure(text=text)
+                # 原文
+                if translated:
+                    slot["original"].configure(text=original)
+                    slot["original"].pack(fill="x", pady=(1,0))
+                else:
+                    slot["original"].pack_forget()
+                # 表示
+                if not slot["frame"].winfo_ismapped():
+                    slot["frame"].pack(fill="x", pady=(0,4))
+            else:
+                slot["frame"].pack_forget()
+                self._slot_keys[i] = None
 
     # ── ポーリング ──
     def _poll(self):
