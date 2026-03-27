@@ -33,7 +33,7 @@ TARGET_LANG        = "ja"  # 翻訳先言語
 NUM_WORKERS        = 3     # 翻訳ワーカースレッド数
 
 # ===== 翻訳エンジン設定 =====
-# "libretranslate" | "deepl"   ← 今後 "google" 等も追加可能
+# "libretranslate" | "deepl" | "azure"   ← 今後 "google" 等も追加可能
 TRANSLATE_ENGINE = os.environ.get("TRANSLATE_ENGINE", "deepl")
 
 # --- LibreTranslate ---
@@ -45,6 +45,11 @@ LIBRETRANSLATE_API_KEY = "47fcc4e7-6a4b-43e3-967b-c60c5438f8d3"
 DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "REDACTED_DEEPL_KEY")
 # Free版: api-free.deepl.com / Pro版: api.deepl.com
 DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
+
+# --- Azure Translator ---
+AZURE_API_KEY    = os.environ.get("AZURE_TRANSLATOR_KEY", "REDACTED_AZURE_KEY")
+AZURE_REGION     = os.environ.get("AZURE_TRANSLATOR_REGION", "japaneast")
+AZURE_API_URL    = "https://api.cognitive.microsofttranslator.com/translate"
 
 # 言語コード → 日本語表示名
 LANG_NAMES = {
@@ -173,10 +178,33 @@ def _translate_deepl(text, source_lang):
     return text
 
 
+def _translate_azure(text, source_lang):
+    """Azure Translator API で翻訳"""
+    import uuid
+    headers = {
+        "Ocp-Apim-Subscription-Key": AZURE_API_KEY,
+        "Ocp-Apim-Subscription-Region": AZURE_REGION,
+        "Content-Type": "application/json",
+        "X-ClientTraceId": str(uuid.uuid4()),
+    }
+    params = {"api-version": "3.0", "from": source_lang, "to": TARGET_LANG}
+    body = [{"text": text}]
+    resp = requests.post(AZURE_API_URL, headers=headers, params=params,
+                         json=body, timeout=5)
+    if resp.status_code == 200:
+        result = resp.json()
+        if result and result[0].get("translations"):
+            return result[0]["translations"][0].get("text", text)
+    else:
+        print(f"[Azure] HTTP {resp.status_code}: {resp.text[:200]}")
+    return text
+
+
 # エンジン名 → 翻訳関数のマッピング
 _ENGINES = {
     "libretranslate": _translate_libretranslate,
     "deepl":          _translate_deepl,
+    "azure":          _translate_azure,
 }
 
 
