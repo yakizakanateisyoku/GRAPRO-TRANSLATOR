@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+dist/
+build/
+# *.spec  # specファイルはリポジトリ管理（再ビルド用）
+config.json
+logs/
+_*.py

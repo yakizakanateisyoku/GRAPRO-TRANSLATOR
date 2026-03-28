@@ -1,0 +1,8 @@
+pytchat==0.5.5
+langdetect==1.0.9
+requests==2.32.5
+flask==3.1.3
+
+# GUI / exe化用（任意）
+# pystray==0.19.5   # システムトレイ対応（タスクバー常駐）したい場合に追加
+pyinstaller==6.11.1  # exe化
