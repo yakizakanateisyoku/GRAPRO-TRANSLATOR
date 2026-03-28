@@ -7,7 +7,7 @@ cd /d %~dp0
 pyinstaller ^
   --onefile ^
   --windowed ^
-  --name obs-translator ^
+  --name grapro-translator ^
   --add-data "main.py;." ^
   --hidden-import langdetect ^
   --hidden-import flask ^
@@ -15,5 +15,5 @@ pyinstaller ^
   gui.py
 
 echo.
-echo ビルド完了: dist\obs-translator.exe
+echo ビルド完了: dist\grapro-translator.exe
 pause

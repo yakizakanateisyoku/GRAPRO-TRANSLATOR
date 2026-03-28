@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='obs-translator',
+    name='grapro-translator',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

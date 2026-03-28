@@ -70,7 +70,7 @@ LANG = {
 class App(ctk.CTk):
     def __init__(self):
         super().__init__(fg_color="#f0efe8")
-        self.title(f"Live Chat Translator v{translator.VERSION}")
+        self.title(f"GRAPRO-TRANSLATOR v{translator.VERSION}")
         self.resizable(False, True)
         self.geometry("360x520")
         self.minsize(360, 400)
@@ -320,15 +320,15 @@ class App(ctk.CTk):
 
     # API プリセット定義
     _API_PRESETS = [
-        ("Cloudflare Tunnel（推奨）", "https://lt.f1234k.com/translate"),
-        ("ローカル", "http://localhost:5000/translate"),
+        ("GRAPROサーバー（推奨）", "https://lt.f1234k.com/translate"),
+        ("自分のPC", "http://localhost:5000/translate"),
     ]
 
     def _open_api_settings(self, _=None):
         """翻訳API接続先の切り替えダイアログ（プリセット選択式）"""
         dlg = ctk.CTkToplevel(self)
-        dlg.title("翻訳API 設定")
-        dlg.geometry("360x300")
+        dlg.title("翻訳サーバー設定")
+        dlg.geometry("360x380")
         dlg.resizable(False, False)
         dlg.grab_set()
         dlg.transient(self)
@@ -341,7 +341,7 @@ class App(ctk.CTk):
                 current_url = r.json().get("url", current_url)
         except: pass
 
-        ctk.CTkLabel(dlg, text="翻訳サーバーの接続先",
+        ctk.CTkLabel(dlg, text="どのサーバーで翻訳しますか？",
                      font=ctk.CTkFont("Meiryo",13,"bold"),
                      fg_color="transparent").pack(padx=16, pady=(16,8), anchor="w")
 
@@ -358,18 +358,30 @@ class App(ctk.CTk):
             choice.set("custom")
 
         # プリセット選択肢
+        _preset_desc = {
+            "GRAPROサーバー（推奨）": "安定・高速。そのまま使えます",
+            "自分のPC": "LibreTranslateを自分で動かす場合",
+        }
         for name, url in self._API_PRESETS:
             rb = ctk.CTkRadioButton(dlg, text=name, variable=choice, value=url,
                                      font=ctk.CTkFont("Meiryo",12),
                                      fg_color="#29b6f6", hover_color="#4fc3f7")
-            rb.pack(anchor="w", padx=20, pady=(2,2))
+            rb.pack(anchor="w", padx=20, pady=(2,0))
+            desc = _preset_desc.get(name, "")
+            if desc:
+                ctk.CTkLabel(dlg, text=desc, text_color="#999999",
+                             font=ctk.CTkFont("Meiryo",10),
+                             fg_color="transparent").pack(anchor="w", padx=44, pady=(0,4))
 
         # カスタム選択肢
-        custom_rb = ctk.CTkRadioButton(dlg, text="カスタム", variable=choice,
+        custom_rb = ctk.CTkRadioButton(dlg, text="その他のサーバー", variable=choice,
                                         value="custom",
                                         font=ctk.CTkFont("Meiryo",12),
                                         fg_color="#29b6f6", hover_color="#4fc3f7")
-        custom_rb.pack(anchor="w", padx=20, pady=(2,2))
+        custom_rb.pack(anchor="w", padx=20, pady=(2,0))
+        ctk.CTkLabel(dlg, text="自前サーバーのURLを下に入力",
+                     text_color="#999999", font=ctk.CTkFont("Meiryo",10),
+                     fg_color="transparent").pack(anchor="w", padx=44, pady=(0,4))
 
         custom_entry = ctk.CTkEntry(dlg, font=ctk.CTkFont("Consolas",11),
                                      height=30, corner_radius=6, placeholder_text="https://...",
@@ -406,7 +418,7 @@ class App(ctk.CTk):
 
         btn_frame = ctk.CTkFrame(dlg, fg_color="transparent")
         btn_frame.pack(fill="x", padx=16, pady=(4,12))
-        ctk.CTkButton(btn_frame, text="切り替え", fg_color="#29b6f6",
+        ctk.CTkButton(btn_frame, text="変更する", fg_color="#29b6f6",
                       hover_color="#4fc3f7", text_color="#ffffff",
                       font=ctk.CTkFont("Meiryo",12,"bold"),
                       height=32, corner_radius=6, width=90,

@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 > nul
-echo [OBS翻訳ツール] 起動中...
+echo [GRAPRO-TRANSLATOR] 起動中...
 
 REM 既存プロセスをポートごとクリア
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":7788 " ^| findstr "LISTENING"') do (
