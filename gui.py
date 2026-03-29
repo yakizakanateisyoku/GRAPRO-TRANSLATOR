@@ -462,12 +462,12 @@ class App(ctk.CTk):
 
         engine_area = ctk.CTkFrame(tf, fg_color="transparent")
         engine_area.pack(fill="x")
-        ctk.CTkRadioButton(engine_area, text="Azure Translator（推奨）",
-                           variable=engine_var, value="azure",
+        ctk.CTkRadioButton(engine_area, text="GRAPROサーバー（推奨）",
+                           variable=engine_var, value="grapro",
                            font=ctk.CTkFont("Meiryo",11),
                            fg_color=ACC, hover_color="#4fc3f7",
                            command=_on_engine_change).pack(anchor="w", padx=4, pady=(2,0))
-        ctk.CTkLabel(engine_area, text="高精度・言語自動検出。GRAPROサーバー経由",
+        ctk.CTkLabel(engine_area, text="高精度・言語自動検出。Azure中継サーバー経由",
                      text_color="#999999", font=ctk.CTkFont("Meiryo",9),
                      fg_color="transparent").pack(anchor="w", padx=28, pady=(0,2))
         ctk.CTkRadioButton(engine_area, text="DeepL（非常用）",
@@ -553,7 +553,7 @@ class App(ctk.CTk):
                 r = SESSION.post(f"http://localhost:{PORT}/lt_url",
                                  json=payload, timeout=3)
                 if r.ok:
-                    label = "LibreTranslate" if eng == "libretranslate" else "DeepL"
+                    label = {"grapro": "GRAPROサーバー", "libretranslate": "LibreTranslate", "deepl": "DeepL"}.get(eng, eng)
                     api_status.configure(text=f"✓ {label}に切り替えました", text_color="#1a936f")
                     self._check_lt()
                 else:

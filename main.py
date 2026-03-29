@@ -27,7 +27,7 @@ import re as _re
 import json as _json
 from flask import Flask, render_template_string, jsonify, request as flask_request
 import requests
-from langdetect import detect, LangDetectException
+# langdetect は廃止済み — 言語検出は翻訳API（Azure/GRAPRO）側に委任
 
 # ===== 設定 =====
 OVERLAY_PORT       = 7788
@@ -37,23 +37,21 @@ TARGET_LANG        = "ja"  # 翻訳先言語
 NUM_WORKERS        = 3     # 翻訳ワーカースレッド数
 
 # ===== 翻訳エンジン設定 =====
-# "libretranslate" | "deepl" | "azure"   ← 今後 "google" 等も追加可能
-TRANSLATE_ENGINE = os.environ.get("TRANSLATE_ENGINE", "azure")
+# "grapro" (中継サーバー経由) | "libretranslate" | "deepl"
+TRANSLATE_ENGINE = os.environ.get("TRANSLATE_ENGINE", "grapro")
 
-# --- LibreTranslate ---
-# 公開IP経由 (MAP-E固定IP → Proxmox socat → LXC LibreTranslate)
+# --- GRAPRO 中継サーバー（推奨）---
+# APIキーはサーバー側にのみ保持。クライアントには配布しない。
+GRAPRO_TRANSLATE_URL = "https://lt.f1234k.com/relay/translate"
+
+# --- LibreTranslate（フォールバック）---
 LIBRETRANSLATE_URL     = "https://lt.f1234k.com/translate"
-LIBRETRANSLATE_API_KEY = "47fcc4e7-6a4b-43e3-967b-c60c5438f8d3"
+LIBRETRANSLATE_API_KEY = ""  # サーバー側で管理
 
-# --- DeepL ---
-DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "0a4a22cd-bafd-4675-a615-202ed06f8d9e:fx")
-# Free版: api-free.deepl.com / Pro版: api.deepl.com
+# --- DeepL（非常用・フォールバック）---
+# ユーザーが自分のAPIキーを設定する場合のみ使用
+DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "")
 DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
-
-# --- Azure Translator ---
-AZURE_API_KEY    = os.environ.get("AZURE_TRANSLATOR_KEY", "")  # 環境変数で設定
-AZURE_REGION     = os.environ.get("AZURE_TRANSLATOR_REGION", "japaneast")
-AZURE_API_URL    = "https://api.cognitive.microsofttranslator.com/translate"
 
 # 言語コード → 日本語表示名
 LANG_NAMES = {
@@ -180,41 +178,31 @@ def _translate_deepl(text, source_lang):
     raise RuntimeError(f"DeepL HTTP {resp.status_code}: {resp.text[:200]}")
 
 
-def _translate_azure(text, source_lang):
-    """Azure Translator API で翻訳（言語検出もAzure任せ）
+def _translate_grapro(text, source_lang):
+    """GRAPRO中継サーバー経由で翻訳（Azure/LLMはサーバー側で処理）
     戻り値: (translated_text, detected_lang)
     """
-    import uuid
-    headers = {
-        "Ocp-Apim-Subscription-Key": AZURE_API_KEY,
-        "Ocp-Apim-Subscription-Region": AZURE_REGION,
-        "Content-Type": "application/json",
-        "X-ClientTraceId": str(uuid.uuid4()),
-    }
-    # source_lang="auto" or 空 → Azure に自動検出させる
-    params = {"api-version": "3.0", "to": TARGET_LANG}
-    if source_lang and source_lang != "auto":
-        params["from"] = source_lang
-    body = [{"text": text}]
-    resp = requests.post(AZURE_API_URL, headers=headers, params=params,
-                         json=body, timeout=5)
+    payload = {"text": text, "target": TARGET_LANG, "worker_id": CLIENT_ID}
+    resp = requests.post(GRAPRO_TRANSLATE_URL, json=payload, timeout=8)
     if resp.status_code == 200:
-        result = resp.json()
-        if result:
-            item = result[0]
-            detected = item.get("detectedLanguage", {}).get("language", "")
-            translations = item.get("translations", [])
-            if translations:
-                translated = translations[0].get("text", text)
-                return translated, detected
-    raise RuntimeError(f"Azure HTTP {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        translated = data.get("translatedText", text)
+        detected = data.get("detectedLanguage", "")
+        return translated, detected
+    elif resp.status_code == 429:
+        print(f"[GRAPRO] レート制限: {resp.json().get('message', '')}")
+        return text, source_lang
+    elif resp.status_code == 403:
+        print(f"[GRAPRO] ブロック: {resp.json().get('message', '')}")
+        return text, source_lang
+    raise RuntimeError(f"GRAPRO HTTP {resp.status_code}: {resp.text[:200]}")
 
 
 # エンジン名 → 翻訳関数のマッピング
 _ENGINES = {
+    "grapro":         _translate_grapro,
     "libretranslate": _translate_libretranslate,
     "deepl":          _translate_deepl,
-    "azure":          _translate_azure,
 }
 
 
@@ -232,7 +220,7 @@ def translate_text(text, source_lang):
             _logged_unsupported.add(source_lang)
             print(f"[翻訳スキップ] 非対応言語 '{source_lang}' → 原文のまま表示")
         return text, source_lang
-    engine_fn = _ENGINES.get(TRANSLATE_ENGINE, _translate_libretranslate)
+    engine_fn = _ENGINES.get(TRANSLATE_ENGINE, _translate_grapro)
     try:
         result = engine_fn(text, source_lang)
         _last_translate_error = None
