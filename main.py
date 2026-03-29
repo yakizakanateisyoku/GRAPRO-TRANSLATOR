@@ -1193,6 +1193,9 @@ def start_chat(video_id):
     while not translation_q.empty():
         try: translation_q.get_nowait()
         except: break
+    # ワーカーが死んでいたら再起動
+    if not worker_threads or not any(t.is_alive() for t in worker_threads):
+        start_workers()
     platform, identifier = _detect_platform(video_id)
     # DEMOモード: 実チャット接続をスキップ
     if platform == "demo":
