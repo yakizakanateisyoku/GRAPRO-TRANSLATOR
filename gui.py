@@ -4,9 +4,9 @@ v1.0.0 - UI整理版
 """
 import customtkinter as ctk
 import tkinter as tk
-import threading, time, sys, os, requests, webbrowser, io
+import threading, time, sys, os, requests, webbrowser, io, random
 from PIL import Image, ImageDraw
-import stats
+import json as _json
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -14,6 +14,24 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 import main as translator
+
+_CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+
+def _load_config():
+    """config.json を読み込む"""
+    try:
+        with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+            return _json.load(f)
+    except:
+        return {}
+
+def _save_config(cfg):
+    """config.json に保存"""
+    try:
+        with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+            _json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except:
+        pass
 
 # Flask をバックグラウンドで起動
 def _start_flask():
@@ -81,6 +99,7 @@ class App(ctk.CTk):
         self._build()
         self._poll()
         self._check_lt()
+        self._check_update()
 
     def _build(self):
         # ── メインカード ──
@@ -115,14 +134,32 @@ class App(ctk.CTk):
         self._api_gear.pack(side="left", padx=(4,0))
         self._api_gear.bind("<Button-1>", self._open_api_settings)
 
-        # 入力ラベル
-        ctk.CTkLabel(card, text="YouTube 配信URL",
-                     text_color="#888888", font=ctk.CTkFont("Meiryo",12),
-                     fg_color="transparent").pack(anchor="w", padx=14, pady=(10,3))
+        # 入力ラベル（プラットフォーム名クリックでURL自動入力）
+        url_label_f = ctk.CTkFrame(card, fg_color="transparent")
+        url_label_f.pack(anchor="w", padx=14, pady=(10,3))
+        ctk.CTkLabel(url_label_f, text="配信URL（",
+                     text_color="#888888", font=ctk.CTkFont("Meiryo",11),
+                     fg_color="transparent").pack(side="left")
+        self._platform_lbls = []
+        for pname, pkey in [("YouTube","youtube"), ("Twitch","twitch"), ("ツイキャス","twitcasting")]:
+            lbl = ctk.CTkLabel(url_label_f, text=pname,
+                               text_color=ACC, font=ctk.CTkFont("Meiryo",11,"bold"),
+                               fg_color="transparent", cursor="hand2")
+            lbl.pack(side="left")
+            lbl.bind("<Button-1>", lambda e, k=pkey: self._fill_channel(k))
+            self._platform_lbls.append(lbl)
+            sep = " / " if pkey != "twitcasting" else ""
+            if sep:
+                ctk.CTkLabel(url_label_f, text=sep,
+                             text_color="#888888", font=ctk.CTkFont("Meiryo",11),
+                             fg_color="transparent").pack(side="left")
+        ctk.CTkLabel(url_label_f, text="）",
+                     text_color="#888888", font=ctk.CTkFont("Meiryo",11),
+                     fg_color="transparent").pack(side="left")
 
         # 入力欄
         self._entry = ctk.CTkEntry(
-            card, placeholder_text="https://youtube.com/watch?v=...",
+            card, placeholder_text="https://youtube.com/watch?v=... or twitch.tv/...",
             fg_color="#ffffff", border_color="#dddddd", border_width=1,
             text_color="#333333", placeholder_text_color="#bbbbbb",
             font=ctk.CTkFont("Meiryo",12), height=36, corner_radius=6)
@@ -166,9 +203,14 @@ class App(ctk.CTk):
 
 
         # ── 翻訳済みメッセージ ──
-        ctk.CTkLabel(card, text="翻訳済みメッセージ",
-                     text_color="#888888", font=ctk.CTkFont("Meiryo",11),
-                     fg_color="transparent").pack(anchor="w", padx=14, pady=(0,4))
+        self._filter_translated = ctk.BooleanVar(value=True)
+        ctk.CTkSwitch(card, text="翻訳済みコメントのみ",
+                      variable=self._filter_translated,
+                      text_color="#888888", font=ctk.CTkFont("Meiryo",11),
+                      fg_color="#dddddd", progress_color="#29b6f6",
+                      button_color="#ffffff", button_hover_color="#f0f0f0",
+                      width=40, height=20
+                      ).pack(anchor="w", padx=14, pady=(0,4))
 
         self._msg_frame = ctk.CTkFrame(card, fg_color="transparent")
         self._msg_frame.pack(fill="both", expand=True, padx=14, pady=(0,12))
@@ -179,7 +221,7 @@ class App(ctk.CTk):
             fg_color="transparent")
         self._lbl_empty.pack(pady=30)
 
-        # スロット永続生成（ダークカード）・初期5個、リサイズで増減
+        # スロット水続生成（ダークカード）・初期5個、リサイズで増減
         self._MSG_BG = "#1a1a1a"
         self._SLOT_HEIGHT = 70  # 1スロットあたりの推定高さ(px)
         self._HEADER_HEIGHT = 200  # ヘッダー部分の推定高さ(px)
@@ -234,7 +276,7 @@ class App(ctk.CTk):
         self._slot_keys.append(None)
 
     def _on_resize(self, event):
-        """ウィンドウ縦リサイズ時にスロット数を調整"""
+        """ウィンドウ縮リサイズ時にスロット数を調整"""
         if event.widget is not self:
             return
         h = event.height
@@ -248,14 +290,25 @@ class App(ctk.CTk):
     # ── ボタンコールバック ──
 
     def _get_vid(self, raw):
+        """URL/IDの検証。YouTube, Twitch, ツイキャス, DEMO に対応"""
         raw = raw.strip()
         if not raw: return None
+        # DEMO
+        if raw.upper().startswith("DEMO"):
+            return raw
+        # Twitch URL: そのまま渡す（main.py側で判定）
+        if "twitch.tv/" in raw:
+            return raw
+        # ツイキャス URL: そのまま渡す
+        if "twitcasting.tv/" in raw:
+            return raw
+        # YouTube URL
         if "youtube.com" in raw or "youtu.be" in raw:
             if "v=" in raw:
                 raw = raw.split("v=")[-1].split("&")[0]
             elif "youtu.be/" in raw:
                 raw = raw.split("youtu.be/")[-1].split("?")[0]
-        if len(raw) >= 8:
+        if len(raw) >= 4:
             return raw
         return None
 
@@ -273,13 +326,15 @@ class App(ctk.CTk):
                         text=f" 配信中 ({vid[:16]})", text_color="#1a936f"))
                     if was_streaming:
                         self.after(0, lambda: self._flash_refresh())
+                    if vid.upper().startswith("DEMO"):
+                        self.after(500, self._run_demo)
             except:
                 self.after(0, lambda: self._lbl_st.configure(
                     text=f" 接続エラー", text_color="#c0392b"))
         # 配信中なら「更新」として再接続
         was_streaming = self._streaming
         if was_streaming:
-            self._retranslate()  # 未翻訳を再翻訳
+            pass  # TODO: 未翻訳を再翻訳（_retranslate）
         if was_streaming:
             self._btn_start.configure(text="再接続中…", state="disabled",
                                        text_color="#999999")
@@ -287,6 +342,8 @@ class App(ctk.CTk):
             self._lbl_st.configure(text=" 再接続中…", text_color="#f1c40f")
         self._streaming = True
         self._entry.configure(state="disabled", fg_color="#f5f5f5", text_color="#999999")
+        for lbl in self._platform_lbls:
+            lbl.configure(text_color="#bbbbbb", cursor="arrow")
         self._btn_start.configure(text="更新", fg_color="#f0faf5",
                                    hover_color="#e0f5eb",
                                    text_color="#1a936f", border_color="#a0d8c0")
@@ -297,11 +354,29 @@ class App(ctk.CTk):
         self._lbl_st.configure(text=f" 開始中…", text_color="#1a936f")
         threading.Thread(target=_do, daemon=True).start()
 
+    def _fill_channel(self, platform_key):
+        """マイチャンネルから保存済みURLを入力欄に自動入力"""
+        cfg = _load_config()
+        channels = cfg.get("my_channels", {})
+        url = channels.get(platform_key, "")
+        if url:
+            if self._streaming:
+                return  # 配信中は変更不可
+            self._entry.delete(0, "end")
+            self._entry.insert(0, url)
+        else:
+            # 未登録 → ヒント表示
+            self._lbl_st.configure(
+                text=f" ⚙ マイチャンネルで{platform_key}を登録してね",
+                text_color="#e67e22")
+
     def _stop(self):
         try: SESSION.get(f"http://localhost:{PORT}/stop", timeout=3)
         except: pass
         self._streaming = False
         self._entry.configure(state="normal", fg_color="#ffffff", text_color="#333333")
+        for lbl in self._platform_lbls:
+            lbl.configure(text_color=ACC, cursor="hand2")
         self._btn_start.configure(text="開始", fg_color="#ffffff",
                                    hover_color="#f0faf5",
                                    text_color="#1a1a1a", border_color="#cccccc")
@@ -325,29 +400,99 @@ class App(ctk.CTk):
     ]
 
     def _open_api_settings(self, _=None):
-        """翻訳API接続先の切り替えダイアログ（プリセット選択式）"""
+        """設定ダイアログ（翻訳 / マイチャンネル タブ）"""
         dlg = ctk.CTkToplevel(self)
-        dlg.title("翻訳サーバー設定")
-        dlg.geometry("360x380")
+        dlg.title("設定")
+        dlg.geometry("400x540")
         dlg.resizable(False, False)
         dlg.grab_set()
         dlg.transient(self)
 
-        # 現在のURL取得
+        # --- タブボタン ---
+        tab_bar = ctk.CTkFrame(dlg, fg_color="transparent")
+        tab_bar.pack(fill="x", padx=16, pady=(12,0))
+        tab_frames = {}
+        tab_btns = {}
+
+        def _switch_tab(name):
+            for k, f in tab_frames.items():
+                f.pack_forget()
+                tab_btns[k].configure(fg_color="#e0e0e0", text_color="#555555")
+            tab_frames[name].pack(fill="both", expand=True, padx=16, pady=(8,0))
+            tab_btns[name].configure(fg_color=ACC, text_color="#ffffff")
+
+        for tab_name in ["翻訳", "マイチャンネル"]:
+            btn = ctk.CTkButton(tab_bar, text=tab_name, fg_color="#e0e0e0",
+                                hover_color="#d0d0d0", text_color="#555555",
+                                font=ctk.CTkFont("Meiryo",11,"bold"),
+                                height=28, corner_radius=6, width=100,
+                                command=lambda n=tab_name: _switch_tab(n))
+            btn.pack(side="left", padx=(0,4))
+            tab_btns[tab_name] = btn
+            f = ctk.CTkFrame(dlg, fg_color="transparent")
+            tab_frames[tab_name] = f
+
+        # ===== 翻訳タブ =====
+        tf = tab_frames["翻訳"]
+
+        # 現在の設定を取得
         current_url = translator.LIBRETRANSLATE_URL
+        current_engine = "libretranslate"
         try:
             r = SESSION.get(f"http://localhost:{PORT}/lt_url", timeout=2)
             if r.ok:
-                current_url = r.json().get("url", current_url)
+                d = r.json()
+                current_url = d.get("url", current_url)
+                current_engine = d.get("engine", current_engine)
         except: pass
 
-        ctk.CTkLabel(dlg, text="どのサーバーで翻訳しますか？",
-                     font=ctk.CTkFont("Meiryo",13,"bold"),
-                     fg_color="transparent").pack(padx=16, pady=(16,8), anchor="w")
+        # --- 翻訳エンジン選択 ---
+        ctk.CTkLabel(tf, text="翻訳エンジン",
+                     font=ctk.CTkFont("Meiryo",12,"bold"),
+                     fg_color="transparent").pack(pady=(8,4), anchor="w")
 
-        # ラジオボタン用変数
+        engine_var = tk.StringVar(value=current_engine)
+        lt_frame = ctk.CTkFrame(tf, fg_color="transparent")  # LibreTranslate詳細（後でpack）
+
+        def _on_engine_change():
+            if engine_var.get() == "libretranslate":
+                lt_frame.pack(fill="x", after=engine_area, pady=(4,0))
+            else:
+                lt_frame.pack_forget()
+
+        engine_area = ctk.CTkFrame(tf, fg_color="transparent")
+        engine_area.pack(fill="x")
+        ctk.CTkRadioButton(engine_area, text="Azure Translator（推奨）",
+                           variable=engine_var, value="azure",
+                           font=ctk.CTkFont("Meiryo",11),
+                           fg_color=ACC, hover_color="#4fc3f7",
+                           command=_on_engine_change).pack(anchor="w", padx=4, pady=(2,0))
+        ctk.CTkLabel(engine_area, text="高精度・言語自動検出。GRAPROサーバー経由",
+                     text_color="#999999", font=ctk.CTkFont("Meiryo",9),
+                     fg_color="transparent").pack(anchor="w", padx=28, pady=(0,2))
+        ctk.CTkRadioButton(engine_area, text="DeepL（非常用）",
+                           variable=engine_var, value="deepl",
+                           font=ctk.CTkFont("Meiryo",11),
+                           fg_color=ACC, hover_color="#4fc3f7",
+                           command=_on_engine_change).pack(anchor="w", padx=4, pady=(2,0))
+        ctk.CTkLabel(engine_area, text="高精度。月50万文字まで無料",
+                     text_color="#999999", font=ctk.CTkFont("Meiryo",9),
+                     fg_color="transparent").pack(anchor="w", padx=28, pady=(0,2))
+        ctk.CTkRadioButton(engine_area, text="LibreTranslate",
+                           variable=engine_var, value="libretranslate",
+                           font=ctk.CTkFont("Meiryo",11),
+                           fg_color=ACC, hover_color="#4fc3f7",
+                           command=_on_engine_change).pack(anchor="w", padx=4, pady=(2,0))
+        ctk.CTkLabel(engine_area, text="無料・軽量。精度は控えめ",
+                     text_color="#999999", font=ctk.CTkFont("Meiryo",9),
+                     fg_color="transparent").pack(anchor="w", padx=28, pady=(0,2))
+
+        # --- LibreTranslate サーバー選択 ---
+        ctk.CTkLabel(lt_frame, text="サーバー",
+                     font=ctk.CTkFont("Meiryo",11,"bold"),
+                     fg_color="transparent").pack(pady=(4,2), anchor="w")
+
         choice = tk.StringVar(value="")
-        # 現在のURLがプリセットに一致するか判定
         preset_match = False
         for name, url in self._API_PRESETS:
             if current_url == url:
@@ -357,78 +502,129 @@ class App(ctk.CTk):
         if not preset_match:
             choice.set("custom")
 
-        # プリセット選択肢
         _preset_desc = {
             "GRAPROサーバー（推奨）": "安定・高速。そのまま使えます",
             "自分のPC": "LibreTranslateを自分で動かす場合",
         }
         for name, url in self._API_PRESETS:
-            rb = ctk.CTkRadioButton(dlg, text=name, variable=choice, value=url,
-                                     font=ctk.CTkFont("Meiryo",12),
-                                     fg_color="#29b6f6", hover_color="#4fc3f7")
-            rb.pack(anchor="w", padx=20, pady=(2,0))
+            rb = ctk.CTkRadioButton(lt_frame, text=name, variable=choice, value=url,
+                                     font=ctk.CTkFont("Meiryo",10),
+                                     fg_color=ACC, hover_color="#4fc3f7")
+            rb.pack(anchor="w", padx=4, pady=(1,0))
             desc = _preset_desc.get(name, "")
             if desc:
-                ctk.CTkLabel(dlg, text=desc, text_color="#999999",
-                             font=ctk.CTkFont("Meiryo",10),
-                             fg_color="transparent").pack(anchor="w", padx=44, pady=(0,4))
+                ctk.CTkLabel(lt_frame, text=desc, text_color="#999999",
+                             font=ctk.CTkFont("Meiryo",8),
+                             fg_color="transparent").pack(anchor="w", padx=28, pady=(0,1))
 
-        # カスタム選択肢
-        custom_rb = ctk.CTkRadioButton(dlg, text="その他のサーバー", variable=choice,
-                                        value="custom",
-                                        font=ctk.CTkFont("Meiryo",12),
-                                        fg_color="#29b6f6", hover_color="#4fc3f7")
-        custom_rb.pack(anchor="w", padx=20, pady=(2,0))
-        ctk.CTkLabel(dlg, text="自前サーバーのURLを下に入力",
-                     text_color="#999999", font=ctk.CTkFont("Meiryo",10),
-                     fg_color="transparent").pack(anchor="w", padx=44, pady=(0,4))
+        custom_rb = ctk.CTkRadioButton(lt_frame, text="その他のサーバー", variable=choice,
+                                        value="custom", font=ctk.CTkFont("Meiryo",10),
+                                        fg_color=ACC, hover_color="#4fc3f7")
+        custom_rb.pack(anchor="w", padx=4, pady=(1,0))
 
-        custom_entry = ctk.CTkEntry(dlg, font=ctk.CTkFont("Consolas",11),
-                                     height=30, corner_radius=6, placeholder_text="https://...",
+        custom_entry = ctk.CTkEntry(lt_frame, font=ctk.CTkFont("Consolas",10),
+                                     height=28, corner_radius=6, placeholder_text="https://...",
                                      fg_color="#ffffff", border_color="#dddddd",
                                      border_width=1, text_color="#333333")
-        custom_entry.pack(fill="x", padx=40, pady=(2,8))
+        custom_entry.pack(fill="x", padx=24, pady=(2,4))
         if not preset_match:
             custom_entry.insert(0, current_url)
 
-        status_lbl = ctk.CTkLabel(dlg, text="", font=ctk.CTkFont("Meiryo",10),
-                                   fg_color="transparent")
-        status_lbl.pack(padx=16, anchor="w")
+        # 初期表示
+        if current_engine == "libretranslate":
+            lt_frame.pack(fill="x", after=engine_area, pady=(4,0))
 
-        def _apply():
-            val = choice.get()
-            if val == "custom":
-                new_url = custom_entry.get().strip()
+        # --- ステータスと適用ボタン ---
+        api_status = ctk.CTkLabel(tf, text="", font=ctk.CTkFont("Meiryo",10),
+                                   fg_color="transparent")
+        api_status.pack(anchor="w")
+
+        def _apply_api():
+            eng = engine_var.get()
+            payload = {"engine": eng}
+            if eng == "libretranslate":
+                val = choice.get()
+                new_url = custom_entry.get().strip() if val == "custom" else val
                 if not new_url:
-                    status_lbl.configure(text="URLを入力してください", text_color="#c0392b")
+                    api_status.configure(text="URLを入力してください", text_color="#c0392b")
                     return
-            else:
-                new_url = val
+                payload["url"] = new_url
             try:
                 r = SESSION.post(f"http://localhost:{PORT}/lt_url",
-                                 json={"url": new_url}, timeout=3)
+                                 json=payload, timeout=3)
                 if r.ok:
-                    status_lbl.configure(text="✓ 切り替えました", text_color="#1a936f")
-                    self.after(800, dlg.destroy)
+                    label = "LibreTranslate" if eng == "libretranslate" else "DeepL"
+                    api_status.configure(text=f"✓ {label}に切り替えました", text_color="#1a936f")
                     self._check_lt()
                 else:
-                    status_lbl.configure(text="エラー", text_color="#c0392b")
-            except Exception as e:
-                status_lbl.configure(text=f"接続エラー", text_color="#c0392b")
+                    api_status.configure(text="エラー", text_color="#c0392b")
+            except:
+                api_status.configure(text="接続エラー", text_color="#c0392b")
 
-        btn_frame = ctk.CTkFrame(dlg, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=16, pady=(4,12))
-        ctk.CTkButton(btn_frame, text="変更する", fg_color="#29b6f6",
-                      hover_color="#4fc3f7", text_color="#ffffff",
-                      font=ctk.CTkFont("Meiryo",12,"bold"),
-                      height=32, corner_radius=6, width=90,
-                      command=_apply).pack(side="right", padx=(4,0))
-        ctk.CTkButton(btn_frame, text="閉じる", fg_color="#ffffff",
+        ctk.CTkButton(tf, text="変更する", fg_color=ACC, hover_color="#4fc3f7",
+                      text_color="#ffffff", font=ctk.CTkFont("Meiryo",11,"bold"),
+                      height=30, corner_radius=6, width=90,
+                      command=_apply_api).pack(anchor="e", pady=(4,0))
+
+        # ===== マイチャンネルタブ =====
+        cf = tab_frames["マイチャンネル"]
+        ctk.CTkLabel(cf, text="よく使う配信チャンネルを登録",
+                     font=ctk.CTkFont("Meiryo",12,"bold"),
+                     fg_color="transparent").pack(pady=(8,6), anchor="w")
+        ctk.CTkLabel(cf, text="プラットフォーム名をクリックするとURLが自動入力されます",
+                     font=ctk.CTkFont("Meiryo",9), text_color="#999999",
+                     fg_color="transparent").pack(anchor="w", pady=(0,8))
+
+        cfg = _load_config()
+        channels = cfg.get("my_channels", {})
+        ch_entries = {}
+        for pname, pkey, placeholder in [
+            ("YouTube", "youtube", "https://youtube.com/watch?v=... or チャンネルURL"),
+            ("Twitch", "twitch", "https://twitch.tv/ユーザー名"),
+            ("ツイキャス", "twitcasting", "https://twitcasting.tv/ユーザー名"),
+        ]:
+            ctk.CTkLabel(cf, text=pname, font=ctk.CTkFont("Meiryo",11,"bold"),
+                         text_color="#333333",
+                         fg_color="transparent").pack(anchor="w", pady=(4,1))
+            ent = ctk.CTkEntry(cf, font=ctk.CTkFont("Consolas",10),
+                               height=28, corner_radius=6,
+                               placeholder_text=placeholder,
+                               fg_color="#ffffff", border_color="#dddddd",
+                               border_width=1, text_color="#333333")
+            ent.pack(fill="x", pady=(0,4))
+            saved = channels.get(pkey, "")
+            if saved:
+                ent.insert(0, saved)
+            ch_entries[pkey] = ent
+
+        ch_status = ctk.CTkLabel(cf, text="", font=ctk.CTkFont("Meiryo",10),
+                                  fg_color="transparent")
+        ch_status.pack(anchor="w", pady=(4,0))
+
+        def _save_channels():
+            cfg = _load_config()
+            cfg["my_channels"] = {
+                k: ent.get().strip() for k, ent in ch_entries.items()
+            }
+            _save_config(cfg)
+            ch_status.configure(text="✓ 保存しました", text_color="#1a936f")
+
+        ctk.CTkButton(cf, text="保存", fg_color=ACC, hover_color="#4fc3f7",
+                      text_color="#ffffff", font=ctk.CTkFont("Meiryo",11,"bold"),
+                      height=30, corner_radius=6, width=90,
+                      command=_save_channels).pack(anchor="e", pady=(4,0))
+
+        # --- 共通: 閉じるボタン（最下部に固定）---
+        bottom_bar = ctk.CTkFrame(dlg, fg_color="transparent")
+        bottom_bar.pack(side="bottom", fill="x", padx=16, pady=(8,12))
+        ctk.CTkButton(bottom_bar, text="閉じる", fg_color="#ffffff",
                       hover_color="#f0efe8", text_color="#555555",
-                      font=ctk.CTkFont("Meiryo",12),
+                      font=ctk.CTkFont("Meiryo",11),
                       border_width=1, border_color="#cccccc",
-                      height=32, corner_radius=6, width=80,
-                      command=dlg.destroy).pack(side="right")
+                      height=30, corner_radius=6, width=80,
+                      command=dlg.destroy).pack(anchor="center")
+
+        _switch_tab("翻訳")
 
     # ── メッセージ描画（永続スロット方式・ちらつきゼロ）──
     def _render_msgs(self, msgs):
@@ -500,7 +696,7 @@ class App(ctk.CTk):
                 r = SESSION.get(f"http://localhost:{PORT}/messages", timeout=1)
                 if r.ok:
                     msgs = r.json()
-                    translated_only = [m for m in msgs if m.get("translated")]
+                    translated_only = [m for m in msgs if m.get("translated")] if self._filter_translated.get() else msgs
                     self.after(0, lambda: self._render_msgs(translated_only))
             except: pass
         threading.Thread(target=_do, daemon=True).start()
@@ -521,7 +717,7 @@ class App(ctk.CTk):
     def _send_feedback(self, slot):
         """翻訳品質フィードバックを送信"""
         lang_code = slot.get("_lang_code", "")
-        stats.record_feedback(source_lang=lang_code)
+        # stats.record_feedback(source_lang=lang_code)  # TODO: stats module未実装
         btn = slot["fb_btn"]
         btn.configure(text="✓", text_color="#1a936f")
         self.after(1500, lambda: btn.configure(text="👎", text_color="#666666"))
@@ -549,7 +745,114 @@ class App(ctk.CTk):
         threading.Thread(target=_do, daemon=True).start()
         self.after(30000, self._check_lt)
 
+    # ── デモモード（30件コメント自動注入）──
+    _DEMO_JA = [
+        {"author": "たかふみ", "original": "おつかれ〜", "translated": None, "lang": "ja"},
+        {"author": "ゲーム好き太郎", "original": "きたきた！待ってました", "translated": None, "lang": "ja"},
+        {"author": "さくら", "original": "こんばんは〜初見です！", "translated": None, "lang": "ja"},
+        {"author": "まさき_ch", "original": "ナイスー！", "translated": None, "lang": "ja"},
+        {"author": "夜更かし勢", "original": "今日も配信ありがとう", "translated": None, "lang": "ja"},
+        {"author": "りょうた", "original": "うまいなぁ", "translated": None, "lang": "ja"},
+        {"author": "みかん", "original": "www", "translated": None, "lang": "ja"},
+        {"author": "ゆっくり勢", "original": "この後どうするの？", "translated": None, "lang": "ja"},
+        {"author": "たけし", "original": "もう一回やって！", "translated": None, "lang": "ja"},
+        {"author": "ねこまる", "original": "8888888", "translated": None, "lang": "ja"},
+        {"author": "あいり", "original": "かわいい〜", "translated": None, "lang": "ja"},
+        {"author": "しゅん_fps", "original": "立ち回りうますぎ", "translated": None, "lang": "ja"},
+        {"author": "まなみ", "original": "今何時間目？", "translated": None, "lang": "ja"},
+        {"author": "だいき", "original": "エイム神", "translated": None, "lang": "ja"},
+        {"author": "ほのか", "original": "BGMいい感じ", "translated": None, "lang": "ja"},
+        {"author": "ゲーマーけん", "original": "次のマッチ楽しみ", "translated": None, "lang": "ja"},
+        {"author": "ともや", "original": "おー！すごい！", "translated": None, "lang": "ja"},
+        {"author": "はるき", "original": "初見だけどハマりそう", "translated": None, "lang": "ja"},
+        {"author": "ゆうな", "original": "がんばれぜ！", "translated": None, "lang": "ja"},
+        {"author": "れん", "original": "ここ難しいよね", "translated": None, "lang": "ja"},
+    ]
+    _DEMO_FOREIGN = [
+        {"author": "Jake_TTV", "original": "yo this stream is fire", "translated": "この配信めっちゃアツい", "lang": "en"},
+        {"author": "GG_Chris", "original": "nice play dude, that was insane", "translated": "ナイスプレイ、やばかった", "lang": "en"},
+        {"author": "Carlos_MX", "original": "saludos desde Mexico!", "translated": "メキシコから挨拶！", "lang": "es"},
+        {"author": "LuciaSP", "original": "me encanta tu stream", "translated": "あなたの配信大好き", "lang": "es"},
+        {"author": "XiaoMing", "original": "第一次看你的直播，很有趣！", "translated": "初めて配信見ました、面白い！", "lang": "zh-cn"},
+        {"author": "DaWei888", "original": "哈哈哈太搞笑了", "translated": "www 面白すぎるwww", "lang": "zh-cn"},
+        {"author": "SoYeon_KR", "original": "bangsong neomu jaemisseoyo", "translated": "配信めっちゃ面白いですwww", "lang": "ko"},
+        {"author": "Pierre_FR", "original": "salut depuis la France!", "translated": "フランスからこんにちは！", "lang": "fr"},
+        {"author": "Ivan_RU", "original": "Privet iz Rossii!", "translated": "ロシアからこんにちは！", "lang": "ru"},
+        {"author": "LucasBR", "original": "boa noite do Brasil!", "translated": "ブラジルからこんばんは！", "lang": "pt"},
+        {"author": "Tommy_US", "original": "lol that was so funny", "translated": "www めっちゃ面白い", "lang": "en"},
+        {"author": "MariaES", "original": "que bonito juego!", "translated": "きれいなゲームだね！", "lang": "es"},
+        {"author": "KimJH_KR", "original": "daebak! jal handa", "translated": "すごい！マジでうまい", "lang": "ko"},
+        {"author": "AnneFR", "original": "bravo, c'est magnifique !", "translated": "ブラボー、素晴らしい！", "lang": "fr"},
+        {"author": "WeiLin_TW", "original": "加油加油！", "translated": "がんばれがんばれ！", "lang": "zh-tw"},
+        {"author": "Alex_UK", "original": "this game looks amazing", "translated": "このゲームすごそう", "lang": "en"},
+        {"author": "HanaBR", "original": "stream muito bom!", "translated": "配信めっちゃいい！", "lang": "pt"},
+        {"author": "MinJi_KR", "original": "eungwonhae!", "translated": "応援してるよ！", "lang": "ko"},
+        {"author": "Marco_IT", "original": "grande stream!", "translated": "最高の配信！", "lang": "it"},
+        {"author": "Sven_DE", "original": "super gameplay!", "translated": "すごいプレイ！", "lang": "de"},
+    ]
+
+    def _run_demo(self):
+        """DEMOモード: 停止まで日本語・外国語交互に1秒1コメント流す"""
+        ja_pool = list(self._DEMO_JA)
+        fg_pool = list(self._DEMO_FOREIGN)
+        random.shuffle(ja_pool)
+        random.shuffle(fg_pool)
+        self._demo_ja_idx = 0
+        self._demo_fg_idx = 0
+        self._demo_is_ja = True
+
+        def _inject(visible):
+            if not self._streaming:
+                return
+            if self._demo_is_ja:
+                msg = ja_pool[self._demo_ja_idx % len(ja_pool)]
+                self._demo_ja_idx += 1
+            else:
+                msg = fg_pool[self._demo_fg_idx % len(fg_pool)]
+                self._demo_fg_idx += 1
+            self._demo_is_ja = not self._demo_is_ja
+            visible.insert(0, msg)
+            batch = visible[:5]
+            try:
+                SESSION.post(f"http://localhost:{PORT}/test_batch", json=batch, timeout=2)
+            except:
+                pass
+            self.after(1000, lambda: _inject(visible))
+
+        _inject([])
+
+    def _check_update(self):
+        """起動後にバックグラウンドでアップデート確認"""
+        def _do():
+            try:
+                r = SESSION.get(f"http://localhost:{PORT}/update_check", timeout=5)
+                if r.ok:
+                    data = r.json()
+                    if data.get("update_available"):
+                        latest = data.get("latest", "")
+                        url = data.get("url", "")
+                        self.after(0, lambda: self._show_update(latest, url))
+            except:
+                pass
+        self.after(3000, lambda: threading.Thread(target=_do, daemon=True).start())
+
+    def _show_update(self, latest, url):
+        """アップデート通知バーを表示"""
+        uf = ctk.CTkFrame(self._card, fg_color="#fff8e1", corner_radius=6, height=28)
+        uf.pack(fill="x", padx=14, pady=(0, 4))
+        lbl = ctk.CTkLabel(uf, text=f"v{latest} が利用可能",
+                           text_color="#f57c00", font=ctk.CTkFont("Meiryo", 10),
+                           fg_color="transparent")
+        lbl.pack(side="left", padx=(8, 0))
+        btn = ctk.CTkLabel(uf, text="ダウンロード", text_color="#1976d2",
+                           font=ctk.CTkFont("Meiryo", 10, "bold"),
+                           fg_color="transparent", cursor="hand2")
+        btn.pack(side="left", padx=(6, 0))
+        btn.bind("<Button-1>", lambda e: webbrowser.open(url))
+
     def _on_close(self):
+        # 全ワーカーに停止シグナルを送る
+        translator.stop_event.set()
         self.destroy()
         os._exit(0)
 
