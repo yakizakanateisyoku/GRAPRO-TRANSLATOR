@@ -1296,14 +1296,16 @@ def test_inject():
 def lt_check():
     """翻訳エンジン疎通確認（エンジン問わず "Hello world" を翻訳してみる）"""
     test_text = "Hello world"
-    result = translate_text(test_text, "en")
+    translated_text, detected_lang = translate_text(test_text, "en")
     if _last_translate_error:
         return jsonify({"status": "error", "engine": TRANSLATE_ENGINE,
                         "error": _last_translate_error})
-    if result == test_text:
+    if translated_text == test_text:
         return jsonify({"status": "warning", "engine": TRANSLATE_ENGINE,
-                        "result": result, "note": "翻訳結果が原文と同一"})
-    return jsonify({"status": "ok", "engine": TRANSLATE_ENGINE, "result": result})
+                        "result": translated_text, "detected_lang": detected_lang,
+                        "note": "翻訳結果が原文と同一"})
+    return jsonify({"status": "ok", "engine": TRANSLATE_ENGINE,
+                    "result": translated_text, "detected_lang": detected_lang})
 
 @app.route('/server_notification')
 def server_notification():
