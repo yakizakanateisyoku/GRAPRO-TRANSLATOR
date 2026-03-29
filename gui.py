@@ -33,6 +33,11 @@ def _save_config(cfg):
     except:
         pass
 
+# config.json から棒読みちゃん設定を復元
+_cfg_init = _load_config()
+translator._bouyomi_enabled = _cfg_init.get("bouyomi_enabled", False)
+translator._bouyomi_port    = _cfg_init.get("bouyomi_port", 50001)
+
 # Flask をバックグラウンドで起動
 def _start_flask():
     import logging; logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -438,7 +443,7 @@ class App(ctk.CTk):
             tab_frames[name].pack(fill="both", expand=True, padx=16, pady=(8,0))
             tab_btns[name].configure(fg_color=ACC, text_color="#ffffff")
 
-        for tab_name in ["翻訳", "マイチャンネル"]:
+        for tab_name in ["翻訳", "マイチャンネル", "外部連携"]:
             btn = ctk.CTkButton(tab_bar, text=tab_name, fg_color="#e0e0e0",
                                 hover_color="#d0d0d0", text_color="#555555",
                                 font=ctk.CTkFont("Meiryo",11,"bold"),
@@ -630,6 +635,113 @@ class App(ctk.CTk):
                       text_color="#ffffff", font=ctk.CTkFont("Meiryo",11,"bold"),
                       height=30, corner_radius=6, width=90,
                       command=_save_channels).pack(anchor="e", pady=(4,0))
+
+        # ===== 外部連携タブ =====
+        ef = tab_frames["外部連携"]
+        ctk.CTkLabel(ef, text="外部アプリ連携",
+                     font=ctk.CTkFont("Meiryo",12,"bold"),
+                     fg_color="transparent").pack(pady=(8,6), anchor="w")
+
+        # --- 棒読みちゃん ---
+        bouyomi_section = ctk.CTkFrame(ef, fg_color="#f5f5f5", corner_radius=8)
+        bouyomi_section.pack(fill="x", pady=(0,8))
+
+        # ヘッダー行（タイトル + スイッチ）
+        bh = ctk.CTkFrame(bouyomi_section, fg_color="transparent")
+        bh.pack(fill="x", padx=12, pady=(10,0))
+        ctk.CTkLabel(bh, text="棒読みちゃん",
+                     font=ctk.CTkFont("Meiryo",12,"bold"), text_color="#333333",
+                     fg_color="transparent").pack(side="left")
+
+        # 現在の状態を取得
+        _bm_enabled = False
+        _bm_port = 50001
+        try:
+            r = SESSION.get(f"http://localhost:{PORT}/bouyomi", timeout=2)
+            if r.ok:
+                d = r.json()
+                _bm_enabled = d.get("enabled", False)
+                _bm_port = d.get("port", 50001)
+        except: pass
+
+        bouyomi_var = tk.BooleanVar(value=_bm_enabled)
+
+        def _on_bouyomi_toggle():
+            enabled = bouyomi_var.get()
+            try:
+                SESSION.post(f"http://localhost:{PORT}/bouyomi",
+                             json={"enabled": enabled}, timeout=2)
+                # config.json にも保存
+                cfg = _load_config()
+                cfg["bouyomi_enabled"] = enabled
+                _save_config(cfg)
+                bm_status.configure(
+                    text="✓ ON" if enabled else "OFF",
+                    text_color="#1a936f" if enabled else "#999999")
+            except:
+                bm_status.configure(text="接続エラー", text_color="#c0392b")
+
+        ctk.CTkSwitch(bh, text="", variable=bouyomi_var,
+                      fg_color="#dddddd", progress_color="#29b6f6",
+                      button_color="#ffffff", button_hover_color="#f0f0f0",
+                      width=40, height=20,
+                      command=_on_bouyomi_toggle).pack(side="right")
+        bm_status = ctk.CTkLabel(bh, text="✓ ON" if _bm_enabled else "OFF",
+                                 text_color="#1a936f" if _bm_enabled else "#999999",
+                                 font=ctk.CTkFont("Meiryo",10),
+                                 fg_color="transparent")
+        bm_status.pack(side="right", padx=(0,8))
+
+        # 説明
+        ctk.CTkLabel(bouyomi_section, text="コメントを棒読みちゃんで読み上げます",
+                     text_color="#666666", font=ctk.CTkFont("Meiryo",10),
+                     fg_color="transparent").pack(anchor="w", padx=12, pady=(2,0))
+        ctk.CTkLabel(bouyomi_section,
+                     text="翻訳済みコメントは日本語で、日本語コメントはそのまま読み上げます",
+                     text_color="#999999", font=ctk.CTkFont("Meiryo",9),
+                     fg_color="transparent").pack(anchor="w", padx=12, pady=(0,4))
+
+        # ポート設定
+        bp = ctk.CTkFrame(bouyomi_section, fg_color="transparent")
+        bp.pack(fill="x", padx=12, pady=(2,10))
+        ctk.CTkLabel(bp, text="ポート:", text_color="#666666",
+                     font=ctk.CTkFont("Meiryo",10),
+                     fg_color="transparent").pack(side="left")
+        bm_port_entry = ctk.CTkEntry(bp, font=ctk.CTkFont("Consolas",10),
+                                      height=26, width=80, corner_radius=4,
+                                      fg_color="#ffffff", border_color="#dddddd",
+                                      border_width=1, text_color="#333333")
+        bm_port_entry.pack(side="left", padx=(4,8))
+        bm_port_entry.insert(0, str(_bm_port))
+
+        def _apply_port():
+            try:
+                p = int(bm_port_entry.get().strip())
+                SESSION.post(f"http://localhost:{PORT}/bouyomi",
+                             json={"port": p}, timeout=2)
+                cfg = _load_config()
+                cfg["bouyomi_port"] = p
+                _save_config(cfg)
+                bm_port_status.configure(text="✓", text_color="#1a936f")
+                self.after(1500, lambda: bm_port_status.configure(text=""))
+            except:
+                bm_port_status.configure(text="エラー", text_color="#c0392b")
+
+        ctk.CTkButton(bp, text="適用", fg_color="#ffffff", hover_color="#f0efe8",
+                      text_color="#555555", font=ctk.CTkFont("Meiryo",9),
+                      border_width=1, border_color="#d0d0d0",
+                      height=24, width=40, corner_radius=4,
+                      command=_apply_port).pack(side="left")
+        bm_port_status = ctk.CTkLabel(bp, text="", font=ctk.CTkFont("Meiryo",9),
+                                       fg_color="transparent")
+        bm_port_status.pack(side="left", padx=(4,0))
+
+        # 注意書き
+        ctk.CTkLabel(ef,
+                     text="棒読みちゃんの設定で「Socket連携」を有効にしてください\n"
+                          "（デフォルト: ポート 50001）",
+                     text_color="#aaaaaa", font=ctk.CTkFont("Meiryo",9),
+                     fg_color="transparent", justify="left").pack(anchor="w", pady=(4,0))
 
         # --- 共通: 閉じるボタン（最下部に固定）---
         bottom_bar = ctk.CTkFrame(dlg, fg_color="transparent")

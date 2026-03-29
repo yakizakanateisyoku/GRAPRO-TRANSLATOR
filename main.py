@@ -15,7 +15,7 @@ OBS YouTube Live Chat 翻訳ツール
   GET /lt_check                   # LibreTranslate 疎通確認
 """
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 import threading
 import time
@@ -88,6 +88,26 @@ translation_q   = queue.Queue()   # 翻訳キュー
 stop_event      = threading.Event()
 chat_thread     = None
 worker_threads  = []
+
+# ===== 棒読みちゃん連携 =====
+_bouyomi_enabled = False
+_bouyomi_port    = 50001
+
+def _send_bouyomi(text: str):
+    """棒読みちゃんにTCPソケットで読み上げ送信（失敗時はサイレント無視）"""
+    if not _bouyomi_enabled or not text:
+        return
+    try:
+        import socket as _sock, struct as _struct
+        msg = text.encode("utf-8")
+        # コマンド=0x0001(読み上げ), 速度=-1, 音程=-1, 音量=-1, 声質=0, 文字コード=0(UTF-8), 長さ
+        header = _struct.pack("<hhhhhbI", 0x0001, -1, -1, -1, 0, 0, len(msg))
+        with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+            s.settimeout(2)
+            s.connect(("127.0.0.1", _bouyomi_port))
+            s.sendall(header + msg)
+    except Exception:
+        pass  # 棒読みちゃん未起動時など — サイレント無視
 
 app = Flask(__name__)
 
@@ -328,6 +348,12 @@ def translation_worker():
                 else:
                     entry = {**base, "original": message, "translated": translated,
                              "lang": detected if detected else lang}
+
+            # 棒読みちゃん読み上げ（翻訳後=日本語 or 原文=日本語）
+            _bouyomi_text = entry.get("translated") or entry.get("original", "")
+            if _bouyomi_text and not item.get("isNotice"):
+                threading.Thread(target=_send_bouyomi,
+                                 args=(_bouyomi_text,), daemon=True).start()
 
             with messages_lock:
                 chat_messages.insert(0, entry)
@@ -1288,6 +1314,19 @@ def server_notification():
     if notif:
         return jsonify(notif)
     return jsonify({"type": None})
+
+@app.route('/bouyomi', methods=['GET', 'POST'])
+def bouyomi():
+    """棒読みちゃん連携の状態取得・設定変更"""
+    global _bouyomi_enabled, _bouyomi_port
+    if flask_request.method == 'GET':
+        return jsonify({"enabled": _bouyomi_enabled, "port": _bouyomi_port})
+    data = flask_request.get_json(force=True)
+    if "enabled" in data:
+        _bouyomi_enabled = bool(data["enabled"])
+    if "port" in data:
+        _bouyomi_port = int(data["port"])
+    return jsonify({"enabled": _bouyomi_enabled, "port": _bouyomi_port})
 
 @app.route('/lt_url', methods=['GET', 'POST'])
 def lt_url():
