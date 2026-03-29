@@ -9,7 +9,6 @@ pyinstaller ^
   --windowed ^
   --name grapro-translator ^
   --add-data "main.py;." ^
-  --hidden-import langdetect ^
   --hidden-import flask ^
   --hidden-import requests ^
   gui.py
