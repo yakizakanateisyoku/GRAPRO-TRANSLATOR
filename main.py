@@ -182,18 +182,27 @@ def _translate_grapro(text, source_lang):
     """GRAPRO中継サーバー経由で翻訳（Azure/LLMはサーバー側で処理）
     戻り値: (translated_text, detected_lang)
     """
+    global _server_notification
     payload = {"text": text, "target": TARGET_LANG, "worker_id": CLIENT_ID}
     resp = requests.post(GRAPRO_TRANSLATE_URL, json=payload, timeout=8)
     if resp.status_code == 200:
         data = resp.json()
         translated = data.get("translatedText", text)
         detected = data.get("detectedLanguage", "")
+        # サーバーからの警告メッセージ
+        if "warning" in data:
+            _server_notification = {"type": "warn", "message": data["warning"]}
+            print(f"[GRAPRO] サーバー警告: {data['warning']}")
         return translated, detected
     elif resp.status_code == 429:
-        print(f"[GRAPRO] レート制限: {resp.json().get('message', '')}")
+        msg = resp.json().get("message", "リクエスト上限に達しました")
+        _server_notification = {"type": "rate_limit", "message": msg}
+        print(f"[GRAPRO] レート制限: {msg}")
         return text, source_lang
     elif resp.status_code == 403:
-        print(f"[GRAPRO] ブロック: {resp.json().get('message', '')}")
+        msg = resp.json().get("message", "このクライアントはブロックされています")
+        _server_notification = {"type": "blocked", "message": msg}
+        print(f"[GRAPRO] ブロック: {msg}")
         return text, source_lang
     raise RuntimeError(f"GRAPRO HTTP {resp.status_code}: {resp.text[:200]}")
 
@@ -207,6 +216,7 @@ _ENGINES = {
 
 
 _last_translate_error = None          # 直近のエラー（診断用）
+_server_notification = None           # サーバーからの通知 {"type": "warn"|"rate_limit"|"blocked", "message": "..."}
 _logged_unsupported = set()           # ログ済み非対応言語（スパム防止）
 
 def translate_text(text, source_lang):
@@ -1268,6 +1278,16 @@ def lt_check():
         return jsonify({"status": "warning", "engine": TRANSLATE_ENGINE,
                         "result": result, "note": "翻訳結果が原文と同一"})
     return jsonify({"status": "ok", "engine": TRANSLATE_ENGINE, "result": result})
+
+@app.route('/server_notification')
+def server_notification():
+    """サーバーからの通知を取得（GUIポーリング用）。取得後クリア。"""
+    global _server_notification
+    notif = _server_notification
+    _server_notification = None
+    if notif:
+        return jsonify(notif)
+    return jsonify({"type": None})
 
 @app.route('/lt_url', methods=['GET', 'POST'])
 def lt_url():

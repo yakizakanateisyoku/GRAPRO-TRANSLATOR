@@ -99,6 +99,7 @@ class App(ctk.CTk):
         self._build()
         self._poll()
         self._check_lt()
+        self._poll_server_notification()
         self._check_update()
 
     def _build(self):
@@ -134,9 +135,25 @@ class App(ctk.CTk):
         self._api_gear.pack(side="left", padx=(4,0))
         self._api_gear.bind("<Button-1>", self._open_api_settings)
 
+        # サーバー通知バー（警告・レート制限・ブロック）
+        self._notif_bar = ctk.CTkFrame(card, fg_color="#2c2c2c", corner_radius=6, height=0)
+        self._notif_lbl = ctk.CTkLabel(self._notif_bar, text="",
+                                        font=ctk.CTkFont("Meiryo", 10),
+                                        text_color="#ffffff", fg_color="transparent",
+                                        wraplength=350, justify="left")
+        self._notif_lbl.pack(padx=8, pady=4, fill="x")
+        self._notif_dismiss = ctk.CTkLabel(self._notif_bar, text="✕",
+                                            font=("Arial", 12), text_color="#aaaaaa",
+                                            fg_color="transparent", cursor="hand2")
+        self._notif_dismiss.place(relx=1.0, rely=0.0, anchor="ne", x=-6, y=4)
+        self._notif_dismiss.bind("<Button-1>", lambda e: self._hide_notification())
+        # 初期は非表示
+        self._notif_visible = False
+
         # 入力ラベル（プラットフォーム名クリックでURL自動入力）
-        url_label_f = ctk.CTkFrame(card, fg_color="transparent")
-        url_label_f.pack(anchor="w", padx=14, pady=(10,3))
+        self._url_label_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self._url_label_frame.pack(anchor="w", padx=14, pady=(10,3))
+        url_label_f = self._url_label_frame
         ctk.CTkLabel(url_label_f, text="配信URL（",
                      text_color="#888888", font=ctk.CTkFont("Meiryo",11),
                      fg_color="transparent").pack(side="left")
@@ -744,6 +761,43 @@ class App(ctk.CTk):
             self.after(0, lambda: self._api_dot.configure(text_color=color))
         threading.Thread(target=_do, daemon=True).start()
         self.after(30000, self._check_lt)
+
+    def _show_notification(self, msg, ntype="warn"):
+        """通知バーを表示。ntype: warn=黄, rate_limit=橙, blocked=赤"""
+        colors = {
+            "warn":       ("#5c4a00", "#ffd54f"),   # 背景, 文字
+            "rate_limit": ("#4a2800", "#ffab40"),
+            "blocked":    ("#4a0000", "#ff5252"),
+        }
+        bg, fg = colors.get(ntype, colors["warn"])
+        icons = {"warn": "⚠", "rate_limit": "⏱", "blocked": "🚫"}
+        icon = icons.get(ntype, "⚠")
+        self._notif_bar.configure(fg_color=bg)
+        self._notif_lbl.configure(text=f"{icon}  {msg}", text_color=fg)
+        if not self._notif_visible:
+            self._notif_bar.pack(fill="x", padx=14, pady=(4, 0), before=self._url_label_frame)
+            self._notif_visible = True
+
+    def _hide_notification(self):
+        """通知バーを非表示"""
+        if self._notif_visible:
+            self._notif_bar.pack_forget()
+            self._notif_visible = False
+
+    def _poll_server_notification(self):
+        """サーバー通知をポーリング（10秒間隔）"""
+        def _do():
+            try:
+                r = SESSION.get(f"http://localhost:{PORT}/server_notification", timeout=5)
+                data = r.json() if r.ok else {}
+                ntype = data.get("type")
+                if ntype:
+                    msg = data.get("message", "サーバーからの通知")
+                    self.after(0, lambda: self._show_notification(msg, ntype))
+            except:
+                pass
+        threading.Thread(target=_do, daemon=True).start()
+        self.after(10000, self._poll_server_notification)
 
     # ── デモモード（30件コメント自動注入）──
     _DEMO_JA = [
