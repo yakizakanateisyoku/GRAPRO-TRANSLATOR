@@ -10,8 +10,8 @@ pyinstaller ^
   --name obs-translator ^
   --add-data "main.py;." ^
   --hidden-import langdetect ^
-  --hidden-import pytchat ^
   --hidden-import flask ^
+  --hidden-import requests ^
   gui.py
 
 echo.
