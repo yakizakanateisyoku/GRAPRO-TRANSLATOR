@@ -38,6 +38,17 @@ _cfg_init = _load_config()
 translator._bouyomi_enabled = _cfg_init.get("bouyomi_enabled", False)
 translator._bouyomi_port    = _cfg_init.get("bouyomi_port", 50001)
 
+# 開発者モード: config.json の "developer_mode" が true なら、Flaskが立つ前にロガーを有効化
+# （sys.excepthook / threading.excepthook / faulthandler のフックを最初期に張る必要があるため）
+# import 自体は無条件に行う（GUIの開発者パネル/トグル/ホットキーから常に参照するため）
+import dev_logger  # noqa: E402
+try:
+    if _cfg_init.get("developer_mode", False):
+        _dev_log_file = dev_logger.enable()
+        print(f"[dev_logger] developer mode ON / log: {_dev_log_file}")
+except Exception as _e:
+    print(f"[dev_logger] enable failed: {_e!r}")
+
 # Flask をバックグラウンドで起動
 def _start_flask():
     import logging; logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -107,6 +118,14 @@ class App(ctk.CTk):
         self._poll_server_notification()
         self._check_update()
 
+        # 開発者モード ホットキー (Ctrl+Shift+D)
+        # Tkinter は大文字/小文字でバインドが別。両方拾う。
+        try:
+            self.bind_all("<Control-Shift-D>", self._hotkey_toggle_dev)
+            self.bind_all("<Control-Shift-d>", self._hotkey_toggle_dev)
+        except Exception as _e:
+            print(f"[dev_logger] hotkey bind failed: {_e!r}")
+
     def _build(self):
         # ── メインカード ──
         card = ctk.CTkFrame(self, fg_color="#ffffff", corner_radius=10)
@@ -139,6 +158,14 @@ class App(ctk.CTk):
                                        cursor="hand2")
         self._api_gear.pack(side="left", padx=(4,0))
         self._api_gear.bind("<Button-1>", self._open_api_settings)
+
+        # 🔬 開発者モード インジケータ (クリックで設定パネル / Ctrl+Shift+D で直接トグル)
+        self._dev_icon = ctk.CTkLabel(api_frame, text="🔬", text_color="#cccccc",
+                                       font=("Arial",12), fg_color="transparent",
+                                       cursor="hand2")
+        self._dev_icon.pack(side="left", padx=(6,0))
+        self._dev_icon.bind("<Button-1>", self._open_dev_panel)
+        self._update_dev_icon()
 
         # サーバー通知バー（警告・レート制限・ブロック）
         self._notif_bar = ctk.CTkFrame(card, fg_color="#2c2c2c", corner_radius=6, height=0)
@@ -414,6 +441,179 @@ class App(ctk.CTk):
         self._btn_copy.configure(text="✓", text_color="#1a936f")
         self.after(1500, lambda: self._btn_copy.configure(
             text="コピー", text_color="#555555"))
+
+    # ===============================
+    # 開発者モード関連
+    # ===============================
+    def _update_dev_icon(self):
+        """🔬 アイコンの色を dev_logger の有効/無効に応じて更新"""
+        try:
+            on = dev_logger.is_enabled()
+        except Exception:
+            on = False
+        try:
+            if on:
+                # 有効: 強調色（ピンク寄りで「録画中」感を出す）
+                self._dev_icon.configure(text_color="#e91e63")
+            else:
+                self._dev_icon.configure(text_color="#cccccc")
+        except Exception:
+            pass
+
+    def _toggle_dev_mode(self) -> bool:
+        """dev_logger を切替し、config.json に永続化。新しい状態を返す"""
+        try:
+            currently_on = dev_logger.is_enabled()
+        except Exception:
+            currently_on = False
+
+        new_state = not currently_on
+        try:
+            if new_state:
+                dev_logger.enable()
+            else:
+                dev_logger.disable()
+        except Exception as e:
+            print(f"[dev_logger] toggle failed: {e!r}")
+            return currently_on
+
+        # config.json に永続化
+        try:
+            cfg = _load_config()
+            cfg["developer_mode"] = new_state
+            _save_config(cfg)
+        except Exception as e:
+            print(f"[dev_logger] config save failed: {e!r}")
+
+        self._update_dev_icon()
+        return new_state
+
+    def _hotkey_toggle_dev(self, _event=None):
+        """Ctrl+Shift+D ホットキー処理。トーストで結果表示"""
+        new_state = self._toggle_dev_mode()
+        msg = "🔬 開発者モード: ON （logsフォルダにログ保存中）" if new_state else "🔬 開発者モード: OFF"
+        self._show_dev_toast(msg)
+
+    def _show_dev_toast(self, msg, ms=2200):
+        """画面下部に2秒だけ表示するトースト"""
+        try:
+            t = ctk.CTkToplevel(self)
+            t.overrideredirect(True)
+            t.attributes("-topmost", True)
+            lbl = ctk.CTkLabel(t, text=msg, font=ctk.CTkFont("Meiryo", 11, "bold"),
+                               text_color="#ffffff", fg_color="#212121",
+                               corner_radius=8, padx=14, pady=8)
+            lbl.pack(padx=2, pady=2)
+            self.update_idletasks()
+            # メインウィンドウ右下に配置
+            x = self.winfo_rootx() + self.winfo_width() - t.winfo_reqwidth() - 18
+            y = self.winfo_rooty() + self.winfo_height() - t.winfo_reqheight() - 18
+            t.geometry(f"+{x}+{y}")
+            t.after(ms, t.destroy)
+        except Exception:
+            pass
+
+    def _open_dev_panel(self, _event=None):
+        """🔬 アイコンクリックで開く開発者モード設定ダイアログ"""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("🔬 開発者モード")
+        dlg.geometry("420x340")
+        dlg.transient(self)
+
+        wrap = ctk.CTkFrame(dlg, fg_color="transparent")
+        wrap.pack(fill="both", expand=True, padx=16, pady=14)
+
+        ctk.CTkLabel(wrap, text="🔬 開発者モード",
+                     font=ctk.CTkFont("Meiryo", 14, "bold"),
+                     text_color="#212121").pack(anchor="w")
+
+        ctk.CTkLabel(wrap,
+                     text="長時間起動してると突然落ちる…等の不具合調査用。\n"
+                          "起動からクラッシュまでの全ログを exe隣の logs/ に保存します。\n"
+                          "通常利用では OFF のままで構いません。",
+                     font=ctk.CTkFont("Meiryo", 11),
+                     text_color="#555555", justify="left").pack(anchor="w", pady=(4, 10))
+
+        # トグル
+        sw_frame = ctk.CTkFrame(wrap, fg_color="#f5f5f5", corner_radius=6)
+        sw_frame.pack(fill="x", pady=(0, 10))
+        sw_inner = ctk.CTkFrame(sw_frame, fg_color="transparent")
+        sw_inner.pack(fill="x", padx=12, pady=10)
+
+        ctk.CTkLabel(sw_inner, text="ロギングを有効化",
+                     font=ctk.CTkFont("Meiryo", 12, "bold"),
+                     text_color="#212121").pack(side="left")
+
+        try:
+            current_on = dev_logger.is_enabled()
+        except Exception:
+            current_on = False
+        sw_var = ctk.BooleanVar(value=current_on)
+
+        def _on_switch():
+            new_state = self._toggle_dev_mode()
+            sw_var.set(new_state)
+            _refresh_status()
+
+        sw = ctk.CTkSwitch(sw_inner, text="", variable=sw_var,
+                           command=_on_switch, onvalue=True, offvalue=False)
+        sw.pack(side="right")
+
+        # 現在ステータス
+        status_lbl = ctk.CTkLabel(wrap, text="", font=ctk.CTkFont("Meiryo", 10),
+                                   text_color="#666666", justify="left",
+                                   wraplength=380, anchor="w")
+        status_lbl.pack(fill="x", pady=(0, 8))
+
+        def _refresh_status():
+            try:
+                on = dev_logger.is_enabled()
+                log_file = dev_logger.get_current_log_file() or "(未生成)"
+                log_dir = dev_logger.get_log_dir()
+                txt = (f"状態: {'● 録画中' if on else '○ 停止中'}\n"
+                       f"保存先: {log_dir}\n"
+                       f"今のログ: {log_file if on else '—'}")
+            except Exception as e:
+                txt = f"取得失敗: {e!r}"
+            status_lbl.configure(text=txt)
+
+        _refresh_status()
+
+        # ボタン群
+        btn_row = ctk.CTkFrame(wrap, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(4, 0))
+
+        def _open_logs():
+            try:
+                dev_logger.open_log_folder()
+            except Exception as e:
+                print(f"[dev_logger] open folder failed: {e!r}")
+
+        ctk.CTkButton(btn_row, text="📁 logsフォルダを開く",
+                      command=_open_logs,
+                      fg_color="#ffffff", hover_color="#f0f0f0",
+                      text_color="#212121", border_color="#dddddd",
+                      border_width=1, corner_radius=6,
+                      font=ctk.CTkFont("Meiryo", 11)).pack(side="left")
+
+        ctk.CTkButton(btn_row, text="閉じる",
+                      command=dlg.destroy,
+                      fg_color="#212121", hover_color="#3a3a3a",
+                      text_color="#ffffff", corner_radius=6,
+                      font=ctk.CTkFont("Meiryo", 11)).pack(side="right")
+
+        # ヒント
+        ctk.CTkLabel(wrap,
+                     text="💡 ヒント: Ctrl + Shift + D でも切替できます",
+                     font=ctk.CTkFont("Meiryo", 10),
+                     text_color="#888888").pack(anchor="w", pady=(10, 0))
+
+        # フォーカス
+        try:
+            dlg.grab_set()
+            dlg.focus_force()
+        except Exception:
+            pass
 
     # API プリセット定義
     _API_PRESETS = [

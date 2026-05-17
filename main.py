@@ -15,7 +15,7 @@ OBS YouTube Live Chat 翻訳ツール
   GET /lt_check                   # LibreTranslate 疎通確認
 """
 
-VERSION = "1.2.1"
+VERSION = "1.4.0"  # 2026/05/18 02:00 JST: SHOWROOM「盛り上がり度数」+ 開発者モード(dev_logger)
 
 import threading
 import time
@@ -89,6 +89,50 @@ stop_event      = threading.Event()
 chat_thread     = None
 worker_threads  = []
 
+# ----- SHOWROOM 盛り上がり度数 -----
+SHOWROOM_API_BASE = "https://www.showroom-live.com/api"
+SHOWROOM_POLL_INTERVAL = 30
+_showroom_data  = {"online_user_num": 0, "room_id": None, "active": False}
+_showroom_lock  = threading.Lock()
+_showroom_stop  = threading.Event()
+_showroom_thread = None
+
+def _showroom_poller(room_id):
+    print(f"[SHOWROOM] polling start room_id={room_id}")
+    s = requests.Session()
+    s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    while not _showroom_stop.is_set():
+        try:
+            r = s.get(f"{SHOWROOM_API_BASE}/live/polling", params={"room_id": room_id}, timeout=10)
+            if r.status_code == 200:
+                with _showroom_lock:
+                    _showroom_data["online_user_num"] = r.json().get("online_user_num", 0)
+                    _showroom_data["active"] = True
+        except Exception as e:
+            print(f"[SHOWROOM] error: {e}")
+        w = 0
+        while w < SHOWROOM_POLL_INTERVAL and not _showroom_stop.is_set():
+            time.sleep(1); w += 1
+    with _showroom_lock:
+        _showroom_data["active"] = False
+    print("[SHOWROOM] polling stop")
+
+def start_showroom(room_id):
+    global _showroom_thread
+    _showroom_stop.clear()
+    with _showroom_lock:
+        _showroom_data.update({"room_id": room_id, "online_user_num": 0, "active": False})
+    if _showroom_thread and _showroom_thread.is_alive():
+        return False
+    _showroom_thread = threading.Thread(target=_showroom_poller, args=(room_id,), daemon=True)
+    _showroom_thread.start()
+    return True
+
+def stop_showroom():
+    _showroom_stop.set()
+    with _showroom_lock:
+        _showroom_data.update({"online_user_num": 0, "active": False, "room_id": None})
+
 # ===== 棒読みちゃん連携 =====
 _bouyomi_enabled = False
 _bouyomi_port    = 50001
@@ -126,6 +170,7 @@ _DEFAULT_SETTINGS = {
     "textSize":      "18",
     "originalColor": "#bbbbbb",
     "count":         "5",
+    "showroomHype":  "off",
 }
 _overlay_settings = dict(_DEFAULT_SETTINGS)
 
@@ -886,6 +931,10 @@ OVERLAY_HTML = r"""<!DOCTYPE html>
   .translated-text{color:var(--text-color);font-family:var(--text-font);font-size:var(--text-size)}
   .original{color:var(--original-color);font-size:13px;margin-top:3px}
   @keyframes fadein{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  #hype-badge{position:fixed;top:8px;left:8px;background:rgba(20,20,25,0.85);border:1px solid #ff6b6b;border-radius:8px;padding:6px 14px;color:#fff;font-family:'Meiryo','Noto Sans JP',sans-serif;font-size:14px;z-index:998;display:none;align-items:center;gap:8px;backdrop-filter:blur(4px)}
+  #hype-badge.visible{display:flex}
+  #hype-badge .hype-num{font-size:22px;font-weight:bold;color:#ff6b6b;font-variant-numeric:tabular-nums}
+  #hype-badge .hype-label{font-size:11px;color:#aaa}
   #gear{position:fixed;top:8px;right:8px;width:32px;height:32px;background:rgba(60,60,60,0.7);border:none;border-radius:50%;color:#ccc;font-size:18px;cursor:pointer;z-index:1000;display:flex;align-items:center;justify-content:center;transition:background 0.2s,transform 0.3s}
   #gear:hover{background:rgba(100,100,100,0.9);transform:rotate(45deg)}
   #panel{display:none;position:fixed;top:0;right:0;width:320px;height:100vh;background:rgba(20,20,25,0.96);z-index:999;overflow-y:auto;padding:16px;color:#ddd;font-family:'Meiryo','Noto Sans JP',sans-serif;font-size:13px;border-left:1px solid #333}
@@ -912,6 +961,7 @@ OVERLAY_HTML = r"""<!DOCTYPE html>
   .toggle-row label{color:#ccc;font-size:12px}
   .toggle-row input[type=checkbox]{width:16px;height:16px;accent-color:#29b6f6}
 </style></head><body>
+<div id="hype-badge"><span style="font-size:18px">&#128293;</span><div><span class="hype-num" id="hypeNum">0</span><br><span class="hype-label">盛り上がり度数</span></div></div>
 <button id="gear" title="設定">&#9881;</button>
 <div id="panel">
   <h3>&#9881; オーバーレイ設定</h3>
@@ -987,6 +1037,10 @@ OVERLAY_HTML = r"""<!DOCTYPE html>
     <label>表示件数</label>
     <div class="srow"><input type="range" id="s_count" min="1" max="20" value="5"><span class="val" id="v_count">5</span></div>
   </div>
+  <div class="sgroup" style="border-top:1px solid #444;padding-top:10px;margin-top:10px">
+    <label>SHOWROOM 盛り上がり度数</label>
+    <div class="srow"><select id="s_showroomHype"><option value="off">非表示</option><option value="on">表示</option></select></div>
+  </div>
   </div>
   <!-- Twitchタブ -->
   <div id="tab-twitch" class="tab-content">
@@ -1054,6 +1108,8 @@ function fillForm(s){
   document.getElementById('s_ytShowAvatar').checked=s.ytShowAvatar!==false;
   document.getElementById('s_ytShowMember').checked=s.ytShowMember!==false;
   document.getElementById('s_ytShowMod').checked=s.ytShowMod!==false;
+  document.getElementById('s_showroomHype').value=s.showroomHype||'off';
+  applyHypeVisibility(s.showroomHype||'off');
 }
 function toHex(c){
   if(/^#[0-9a-f]{6}$/i.test(c))return c;
@@ -1086,6 +1142,7 @@ function readForm(){
     textSize:document.getElementById('s_textSize').value,
     originalColor:document.getElementById('s_originalColor').value,
     count:document.getElementById('s_count').value,
+    showroomHype:document.getElementById('s_showroomHype').value,
     // Twitch設定
     twUseTwitchColor:document.getElementById('s_twUseTwitchColor').checked,
     twShowSubMonths:document.getElementById('s_twShowSubMonths').checked,
@@ -1098,7 +1155,7 @@ function readForm(){
     ytShowMod:document.getElementById('s_ytShowMod').checked,
   };
 }
-function liveUpdate(){applyCSS(readForm());}
+function liveUpdate(){const f=readForm();applyCSS(f);applyHypeVisibility(f.showroomHype);}
 document.querySelectorAll('#panel input, #panel select').forEach(el=>{
   el.addEventListener('input',()=>{
     if(el.id==='s_authorSize')document.getElementById('v_authorSize').textContent=el.value+'px';
@@ -1119,7 +1176,7 @@ document.getElementById('btnSave').addEventListener('click',async()=>{
     setTimeout(()=>document.getElementById('btnSave').textContent='\u4fdd\u5b58',1500);
   }catch(e){alert('\u4fdd\u5b58\u5931\u6557: '+e);}
 });
-const DEFAULTS={bodyBg:'transparent',msgBg:'rgba(0,0,0,0.88)',accentTranslated:'#29b6f6',accentJapanese:'#555555',authorColor:'#ffe066',authorFont:'Meiryo, Noto Sans JP, sans-serif',authorSize:'14',textColor:'#ffffff',textFont:'Meiryo, Noto Sans JP, sans-serif',textSize:'18',originalColor:'#bbbbbb',count:'5',twUseTwitchColor:true,twShowSubMonths:true,twShowFirstMsg:true,twShowVip:true,twShowNotices:true,ytShowAvatar:true,ytShowMember:true,ytShowMod:true};
+const DEFAULTS={bodyBg:'transparent',msgBg:'rgba(0,0,0,0.88)',accentTranslated:'#29b6f6',accentJapanese:'#555555',authorColor:'#ffe066',authorFont:'Meiryo, Noto Sans JP, sans-serif',authorSize:'14',textColor:'#ffffff',textFont:'Meiryo, Noto Sans JP, sans-serif',textSize:'18',originalColor:'#bbbbbb',count:'5',twUseTwitchColor:true,twShowSubMonths:true,twShowFirstMsg:true,twShowVip:true,twShowNotices:true,ytShowAvatar:true,ytShowMember:true,ytShowMod:true,showroomHype:'off'};
 let CFG=Object.assign({},DEFAULTS);
 document.getElementById('btnReset').addEventListener('click',()=>{fillForm(DEFAULTS);applyCSS(DEFAULTS);});
 async function initSettings(){
@@ -1196,6 +1253,20 @@ function badges(m){
 }
 const LANG={af:'アフリカーンス語',ar:'アラビア語',az:'アゼルバイジャン語',bg:'ブルガリア語',bn:'ベンガル語',ca:'カタルーニャ語',cs:'チェコ語',da:'デンマーク語',de:'ドイツ語',el:'ギリシャ語',en:'英語',eo:'エスペラント語',es:'スペイン語',et:'エストニア語',fa:'ペルシャ語',fi:'フィンランド語',fr:'フランス語',he:'ヘブライ語',hi:'ヒンディー語',hu:'ハンガリー語',id:'インドネシア語',it:'イタリア語',ko:'韓国語',lt:'リトアニア語',lv:'ラトビア語',ms:'マレー語',nl:'オランダ語',pl:'ポーランド語',pt:'ポルトガル語','pt-br':'ポルトガル語(BR)',ro:'ルーマニア語',ru:'ロシア語',sk:'スロバキア語',sl:'スロベニア語',sq:'アルバニア語',sv:'スウェーデン語',th:'タイ語',tl:'タガログ語',tr:'トルコ語',uk:'ウクライナ語',ur:'ウルドゥー語',vi:'ベトナム語',zh:'中国語','zh-cn':'中国語','zh-hans':'中国語(簡体)','zh-tw':'中国語(繁体)','zh-hant':'中国語(繁体)'};
 function langName(c){return LANG[c.toLowerCase()]||c;}
+/* SHOWROOM hype */
+const hypeBadge=document.getElementById('hype-badge');
+const hypeNum=document.getElementById('hypeNum');
+let hypeVisible=false;
+function applyHypeVisibility(v){hypeVisible=(v==='on');hypeBadge.classList.toggle('visible',hypeVisible);}
+async function pollHype(){
+  if(!hypeVisible){setTimeout(pollHype,5000);return;}
+  try{const r=await fetch('/showroom/hype');const d=await r.json();
+    if(d.active&&d.online_user_num>0){hypeNum.textContent=d.online_user_num.toLocaleString();hypeBadge.classList.add('visible');}
+    else if(hypeVisible){hypeNum.textContent='--';}
+  }catch(e){}
+  setTimeout(pollHype,5000);
+}
+pollHype();
 poll();
 </script></body></html>"""
 
@@ -1291,6 +1362,21 @@ def test_inject():
         for s in reversed(samples):
             chat_messages.insert(0, s)
     return jsonify({"status": "ok", "injected": len(samples)})
+
+@app.route('/showroom/start/<int:room_id>')
+def showroom_start(room_id):
+    ok = start_showroom(room_id)
+    return jsonify({"status": "started" if ok else "already running", "room_id": room_id})
+
+@app.route('/showroom/stop')
+def showroom_stop_route():
+    stop_showroom()
+    return jsonify({"status": "stopped"})
+
+@app.route('/showroom/hype')
+def showroom_hype():
+    with _showroom_lock:
+        return jsonify(dict(_showroom_data))
 
 @app.route('/lt_check')
 def lt_check():
