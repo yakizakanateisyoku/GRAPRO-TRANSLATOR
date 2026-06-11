@@ -5,7 +5,7 @@ a = Analysis(
     ['gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('"main.py', '."')],
+    datas=[('main.py', '.'), ('dev_logger.py', '.')],
     hiddenimports=['flask', 'requests', 'dev_logger'],
     hookspath=[],
     hooksconfig={},
