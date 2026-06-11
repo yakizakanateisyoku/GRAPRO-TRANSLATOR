@@ -87,6 +87,9 @@ def fetch_avatar(url, size=22):
         ImageDraw.Draw(mask).ellipse((0,0,size*2-1,size*2-1), fill=255)
         img.putalpha(mask)
         ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+        # キャッシュ肥大防止（長時間配信でユニーク視聴者が増え続けるとメモリを食う）
+        if len(_avatar_cache) > 300:
+            _avatar_cache.clear()
         _avatar_cache[url] = ctk_img
         return ctk_img
     except:
@@ -991,10 +994,16 @@ class App(ctk.CTk):
                 if img_url and img_url != slot["_av_url"]:
                     slot["_av_url"] = img_url
                     def _load(lbl=slot["avatar"], url=img_url):
+                        # 別スレッドではネットワークI/Oのみ行う
                         img = fetch_avatar(url, size=22)
                         if img:
-                            try: lbl.configure(image=img, text="")
-                            except: pass
+                            # Tkウィジェット操作は必ずメインスレッドで行う
+                            # （別スレッド直叩きは長時間稼働での突然クラッシュ要因）
+                            def _apply(lbl=lbl, img=img):
+                                try: lbl.configure(image=img, text="")
+                                except Exception: pass
+                            try: self.after(0, _apply)
+                            except Exception: pass
                     threading.Thread(target=_load, daemon=True).start()
                 if translated:
                     slot["lang_badge"].configure(text=f" {lang_label} ")
@@ -1178,6 +1187,7 @@ class App(ctk.CTk):
                 self._demo_fg_idx += 1
             self._demo_is_ja = not self._demo_is_ja
             visible.insert(0, msg)
+            del visible[10:]  # 無制限に伸びないよう切り詰め
             batch = visible[:5]
             try:
                 SESSION.post(f"http://localhost:{PORT}/test_batch", json=batch, timeout=2)

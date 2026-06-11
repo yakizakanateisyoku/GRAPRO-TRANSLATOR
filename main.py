@@ -84,10 +84,41 @@ LANG_NAMES = {
 # ===== グローバル状態 =====
 chat_messages   = []          # 表示用メッセージリスト
 messages_lock   = threading.Lock()
-translation_q   = queue.Queue()   # 翻訳キュー
+TRANSLATION_QUEUE_MAX = 300   # 翻訳キュー上限（無制限だと翻訳API停止時にメモリ肥大）
+translation_q   = queue.Queue(maxsize=TRANSLATION_QUEUE_MAX)   # 翻訳キュー
 stop_event      = threading.Event()
 chat_thread     = None
 worker_threads  = []
+_last_video_id  = None        # watchdog 再起動用に直近の配信IDを保持
+
+_q_drop_count = 0
+
+def _enqueue_translation(item):
+    """翻訳キューへ投入。満杯時は最古を捨てて新着を優先（翻訳API停止時の詰まり対策）"""
+    global _q_drop_count
+    try:
+        translation_q.put_nowait(item)
+        return
+    except queue.Full:
+        pass
+    try:
+        translation_q.get_nowait()
+        translation_q.task_done()
+    except queue.Empty:
+        pass
+    try:
+        translation_q.put_nowait(item)
+    except queue.Full:
+        pass
+    _q_drop_count += 1
+    if _q_drop_count % 50 == 1:
+        print(f"[キュー] 翻訳キュー満杯のため古いコメントを破棄 (累計{_q_drop_count})")
+
+
+def _reconnect_wait(retry):
+    """再接続前の待機。指数バックオフ（3秒→最大60秒）。stop_event で即中断"""
+    wait = min(60, 3 * (2 ** min(retry, 5)))
+    stop_event.wait(wait)
 
 # ----- SHOWROOM 盛り上がり度数 -----
 SHOWROOM_API_BASE = "https://www.showroom-live.com/api"
@@ -197,6 +228,27 @@ _load_settings()
 
 # ===== 翻訳・言語判定 =====
 
+# 翻訳API用の共有セッション（接続再利用 + 一時エラー自動リトライ）
+from requests.adapters import HTTPAdapter
+try:
+    from urllib3.util.retry import Retry
+except Exception:
+    Retry = None
+
+_TRANSLATE_SESSION = requests.Session()
+if Retry is not None:
+    try:
+        _retry = Retry(total=2, backoff_factor=0.5,
+                       status_forcelist=(500, 502, 503, 504),
+                       allowed_methods=frozenset(["GET", "POST"]))
+    except TypeError:  # 古い urllib3 は method_whitelist
+        _retry = Retry(total=2, backoff_factor=0.5,
+                       status_forcelist=(500, 502, 503, 504),
+                       method_whitelist=frozenset(["GET", "POST"]))
+    _adapter = HTTPAdapter(max_retries=_retry, pool_maxsize=NUM_WORKERS + 2)
+    _TRANSLATE_SESSION.mount("https://", _adapter)
+    _TRANSLATE_SESSION.mount("http://", _adapter)
+
 # --- DeepL 言語コード変換 ---
 # langdetect → DeepL ソース言語コード
 _DEEPL_SOURCE_MAP = {
@@ -217,7 +269,7 @@ _DEEPL_TARGET_MAP = {
 
 def _translate_libretranslate(text, source_lang):
     """LibreTranslate で翻訳"""
-    resp = requests.post(LIBRETRANSLATE_URL, json={
+    resp = _TRANSLATE_SESSION.post(LIBRETRANSLATE_URL, json={
         "q": text, "source": source_lang, "target": TARGET_LANG, "format": "text",
         "api_key": LIBRETRANSLATE_API_KEY,
     }, timeout=5)
@@ -235,7 +287,7 @@ def _translate_deepl(text, source_lang):
     src = _DEEPL_SOURCE_MAP.get(source_lang)
     if src:
         data["source_lang"] = src
-    resp = requests.post(DEEPL_API_URL, headers=headers, data=data, timeout=5)
+    resp = _TRANSLATE_SESSION.post(DEEPL_API_URL, headers=headers, data=data, timeout=5)
     if resp.status_code == 200:
         translations = resp.json().get("translations", [])
         if translations:
@@ -249,7 +301,7 @@ def _translate_grapro(text, source_lang):
     """
     global _server_notification
     payload = {"text": text, "target": TARGET_LANG, "worker_id": CLIENT_ID}
-    resp = requests.post(GRAPRO_TRANSLATE_URL, json=payload, timeout=8)
+    resp = _TRANSLATE_SESSION.post(GRAPRO_TRANSLATE_URL, json=payload, timeout=8)
     if resp.status_code == 200:
         data = resp.json()
         translated = data.get("translatedText", text)
@@ -306,6 +358,14 @@ def translate_text(text, source_lang):
     except Exception as e:
         _last_translate_error = str(e)
         print(f"[翻訳エラー][{TRANSLATE_ENGINE}] {e}")
+        # GRAPRO 失敗時は LibreTranslate へ自動フォールバック（原文表示よりマシ）
+        if engine_fn is _translate_grapro:
+            try:
+                fb = _translate_libretranslate(text, source_lang or "auto")
+                print("[翻訳フォールバック] LibreTranslate で翻訳成功")
+                return fb, source_lang
+            except Exception as e2:
+                print(f"[翻訳フォールバック失敗] {e2}")
     return text, source_lang
 
 
@@ -515,13 +575,13 @@ def _youtube_chat_worker(video_id):
     """YouTube Live Chat API で直接チャット取得 → 言語判定 → 翻訳キューへ投入"""
     print(f"[YouTube] video_id={video_id}")
     retry = 0
-    while not stop_event.is_set() and retry < 5:
+    while not stop_event.is_set():
         try:
             api_key, continuation = _get_initial_chat_info(video_id)
             if not continuation:
                 print(f"[YouTube] continuationトークン取得失敗 retry={retry+1}")
                 retry += 1
-                time.sleep(3)
+                _reconnect_wait(retry)
                 continue
             print(f"[YouTube] 接続成功 retry={retry}")
             retry = 0
@@ -532,7 +592,7 @@ def _youtube_chat_worker(video_id):
                     if lang is None:
                         continue
                     m["lang"] = lang
-                    translation_q.put(m)
+                    _enqueue_translation(m)
                 if next_cont:
                     continuation = next_cont
                 else:
@@ -547,9 +607,8 @@ def _youtube_chat_worker(video_id):
             print(f"[YouTube エラー] {e}")
             if not stop_event.is_set():
                 retry += 1
-                time.sleep(3)
-    if retry >= 5:
-        print("[YouTube] 再接続5回失敗、終了")
+                print(f"[YouTube] 再接続します retry={retry}")
+                _reconnect_wait(retry)
     print("[YouTube 終了]")
 
 
@@ -561,7 +620,7 @@ def _twitch_chat_worker(channel):
     nick = f"justinfan{random.randint(10000, 99999)}"
     print(f"[Twitch] channel={channel} nick={nick}")
     retry = 0
-    while not stop_event.is_set() and retry < 5:
+    while not stop_event.is_set():
         sock = None
         try:
             sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
@@ -609,7 +668,7 @@ def _twitch_chat_worker(channel):
                             sys_msg = tags.get("system-msg", "").replace("\\s", " ")
                             user_msg = (um.group(1) or "").strip()
                             display_name = tags.get("display-name", "")
-                            translation_q.put({
+                            _enqueue_translation({
                                 "author": display_name or notice_type,
                                 "message": user_msg or sys_msg,
                                 "lang": "en", "imageUrl": "", "badgeUrl": "",
@@ -654,7 +713,7 @@ def _twitch_chat_worker(channel):
                             lang = detect_language(text)
                             if lang is None:
                                 continue
-                            translation_q.put({
+                            _enqueue_translation({
                                 "author": author, "message": text,
                                 "lang": lang, "imageUrl": "", "badgeUrl": "",
                                 "isMember": is_sub, "isMod": is_mod, "isOwner": is_owner,
@@ -668,13 +727,12 @@ def _twitch_chat_worker(channel):
             print(f"[Twitch エラー] {e}")
             if not stop_event.is_set():
                 retry += 1
-                time.sleep(3)
+                print(f"[Twitch] 再接続します retry={retry}")
+                _reconnect_wait(retry)
         finally:
             if sock:
                 try: sock.close()
                 except: pass
-    if retry >= 5:
-        print("[Twitch] 再接続5回失敗、終了")
     print("[Twitch 終了]")
 
 
@@ -731,25 +789,28 @@ def _twitcasting_chat_worker(user_id):
         if not token:
             print("[ツイキャス] APIトークンが未設定です。環境変数 TWITCASTING_CLIENT_ID / TWITCASTING_CLIENT_SECRET を設定してください")
             # オーバーレイに通知メッセージを表示
-            messages.append({
-                "author": "システム", "message": "",
-                "translatedText": "⚠ ツイキャスのAPI設定が必要です（設定 → 詳細はドキュメント参照）",
-                "lang": "ja", "imageUrl": "", "badgeUrl": "",
-                "isMember": False, "isMod": False, "isOwner": False,
-                "isNotice": True, "noticeType": "system",
-                "noticeMsg": "ツイキャスAPI未設定: ClientID/SecretをGRAPRO設定で登録してください",
-            })
+            # （旧実装は未定義変数 messages を参照しており NameError でスレッドが落ちていた）
+            with messages_lock:
+                chat_messages.insert(0, {
+                    "author": "システム",
+                    "original": "⚠ ツイキャスのAPI設定が必要です（設定 → 詳細はドキュメント参照）",
+                    "translated": None,
+                    "lang": "ja", "imageUrl": "", "badgeUrl": "",
+                    "isMember": False, "isMod": False, "isOwner": False,
+                    "isNotice": True, "noticeType": "system",
+                    "noticeMsg": "ツイキャスAPI未設定: ClientID/SecretをGRAPRO設定で登録してください",
+                })
             return
 
     print(f"[ツイキャス] user_id={user_id}")
     retry = 0
-    while not stop_event.is_set() and retry < 5:
+    while not stop_event.is_set():
         try:
             movie_id = _twitcasting_get_movie_id(user_id, token)
             if not movie_id:
                 print(f"[ツイキャス] ライブ配信が見つかりません retry={retry+1}")
                 retry += 1
-                time.sleep(5)
+                _reconnect_wait(retry)
                 continue
             print(f"[ツイキャス] movie_id={movie_id}")
             retry = 0
@@ -780,7 +841,7 @@ def _twitcasting_chat_worker(user_id):
                     lang = detect_language(text)
                     if lang is None:
                         continue
-                    translation_q.put({
+                    _enqueue_translation({
                         "author": author, "message": text,
                         "lang": lang, "imageUrl": image_url, "badgeUrl": "",
                         "isMember": False, "isMod": False, "isOwner": False,
@@ -794,9 +855,8 @@ def _twitcasting_chat_worker(user_id):
             print(f"[ツイキャス エラー] {e}")
             if not stop_event.is_set():
                 retry += 1
-                time.sleep(3)
-    if retry >= 5:
-        print("[ツイキャス] 再接続5回失敗、終了")
+                print(f"[ツイキャス] 再接続します retry={retry}")
+                _reconnect_wait(retry)
     print("[ツイキャス 終了]")
 
 
@@ -882,15 +942,48 @@ def update_check():
     })
 
 
+_watchdog_started = False
+
+def _watchdog_loop():
+    """30秒間隔でスレッド死活監視。死んだ翻訳ワーカー/チャットスレッドを自動再起動"""
+    global chat_thread
+    while True:
+        time.sleep(30)
+        try:
+            # /stop 中（stop_event セット中）はワーカーが終了するのは正常動作
+            if stop_event.is_set():
+                continue
+            # 翻訳ワーカーの再起動
+            for i, t in enumerate(worker_threads):
+                if not t.is_alive():
+                    nt = threading.Thread(target=translation_worker, daemon=True,
+                                          name=f"worker-{i}")
+                    nt.start()
+                    worker_threads[i] = nt
+                    print(f"[watchdog] 翻訳ワーカー{i} が停止していたため再起動")
+            # チャットスレッドの再起動（配信中に予期せず死んだ場合のみ）
+            if _last_video_id and (chat_thread is None or not chat_thread.is_alive()):
+                print(f"[watchdog] チャットスレッド停止を検出 → 再起動 ({_last_video_id})")
+                chat_thread = threading.Thread(target=chat_worker,
+                                               args=(_last_video_id,), daemon=True)
+                chat_thread.start()
+        except Exception as e:
+            print(f"[watchdog] エラー: {e}")
+
+
 def start_workers():
     """翻訳ワーカースレッドを NUM_WORKERS 本起動"""
-    global worker_threads
+    global worker_threads, _watchdog_started
     worker_threads = []
     for i in range(NUM_WORKERS):
         t = threading.Thread(target=translation_worker, daemon=True, name=f"worker-{i}")
         t.start()
         worker_threads.append(t)
     print(f"[ワーカー起動] {NUM_WORKERS} 本")
+    # 死活監視 watchdog（多重起動防止）
+    if not _watchdog_started:
+        _watchdog_started = True
+        threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog").start()
     # バックグラウンドでアップデートチェック
     threading.Thread(target=check_update, daemon=True).start()
 
@@ -1294,7 +1387,7 @@ def get_messages():
 
 @app.route('/start/<path:video_id>')
 def start_chat(video_id):
-    global chat_thread
+    global chat_thread, _last_video_id
     stop_event.clear()
     # キューをフラッシュ
     while not translation_q.empty():
@@ -1306,9 +1399,11 @@ def start_chat(video_id):
     platform, identifier = _detect_platform(video_id)
     # DEMOモード: 実チャット接続をスキップ
     if platform == "demo":
+        _last_video_id = None  # watchdog 対象外
         with messages_lock:
             chat_messages.clear()
         return jsonify({"status": "started", "platform": "demo", "video_id": video_id})
+    _last_video_id = video_id  # watchdog 再起動用
     if chat_thread and chat_thread.is_alive():
         return jsonify({"status": "already running", "video_id": video_id})
     chat_thread = threading.Thread(target=chat_worker, args=(video_id,), daemon=True)
@@ -1317,6 +1412,8 @@ def start_chat(video_id):
 
 @app.route('/stop')
 def stop_chat():
+    global _last_video_id
+    _last_video_id = None  # watchdog による再起動を止める
     stop_event.set()
     with messages_lock:
         chat_messages.clear()
