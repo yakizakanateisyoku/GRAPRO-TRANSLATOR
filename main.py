@@ -15,7 +15,7 @@ OBS YouTube Live Chat 翻訳ツール
   GET /lt_check                   # LibreTranslate 疎通確認
 """
 
-VERSION = "1.4.0"  # 2026/05/18 02:00 JST: SHOWROOM「盛り上がり度数」+ 開発者モード(dev_logger)
+VERSION = "1.4.1"  # 2026/06/12: 安定性改善（自動再接続強化・Tkスレッド安全性・キュー上限・翻訳フォールバック）
 
 import threading
 import time
