@@ -1,33 +1,49 @@
 """
-OBS YouTube Live Chat 翻訳ツール
-- pytchat でYouTubeライブチャットを取得
-- langdetect で言語判定（オフライン）
-- LibreTranslate で日本語以外を翻訳（キュー処理・複数ワーカー対応）
-- Flask でOBS ブラウザソース用オーバーレイを提供
+GRAPRO-TRANSLATOR - ライブ配信チャット翻訳ツール
+- YouTube InnerTube API / Twitch IRC / ツイキャス API v2 でチャットを直接取得
+- 言語検出・翻訳は GRAPRO 中継サーバー（Azure Translator）側に委任
+- キュー処理・複数ワーカーで並列翻訳
+- Flask で OBS ブラウザソース用オーバーレイを提供
 
 使い方:
   python main.py                  # サーバーのみ起動
   python main.py <video_id>       # 起動時にチャット開始
-  GET /start/<video_id>           # チャット開始
-  GET /stop                       # チャット停止
+  GET /start/<video_id>           # チャット開始（要トークン: ?token=XXX）
+  GET /stop                       # チャット停止（要トークン）
   GET /status                     # 状態確認
   GET /test                       # ダミーデータ注入（UIテスト用）
-  GET /lt_check                   # LibreTranslate 疎通確認
+  GET /lt_check                   # 翻訳エンジン疎通確認（実翻訳・要トークン）
+  GET /api_health                 # 軽量ヘルスチェック（翻訳なし・課金なし）
+  ※ トークンは起動時にコンソールへ表示されます（GUI利用時は自動付与）
 """
 
-VERSION = "1.4.1"  # 2026/06/12: 安定性改善（自動再接続強化・Tkスレッド安全性・キュー上限・翻訳フォールバック）
+VERSION = "1.5.0"  # 2026/07/08: LibreTranslate復旧・worker_id永続化・APIトークン保護・翻訳キャッシュ・再接続強化
 
 import threading
 import time
 import queue
 import sys
 import os
+import uuid as _uuid
+import itertools as _itertools
 import socket as _socket
 import re as _re
 import json as _json
+from collections import OrderedDict
 from flask import Flask, render_template_string, jsonify, request as flask_request
 import requests
 # langdetect は廃止済み — 言語検出は翻訳API（Azure/GRAPRO）側に委任
+
+# ===== パス解決 =====
+def _base_dir():
+    """exe（またはスクリプト）隣接の永続ディレクトリを返す。
+    PyInstaller onefile では __file__ が一時展開フォルダ(_MEIPASS)を指し
+    終了時に消えるため、必ず sys.executable 基準にする。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+BASE_DIR = _base_dir()
 
 # ===== 設定 =====
 OVERLAY_PORT       = 7788
@@ -90,6 +106,7 @@ stop_event      = threading.Event()
 chat_thread     = None
 worker_threads  = []
 _last_video_id  = None        # watchdog 再起動用に直近の配信IDを保持
+_MSG_COUNTER    = _itertools.count(1)   # メッセージ一意ID（同一コメント連投の表示潰れ防止）
 
 _q_drop_count = 0
 
@@ -186,8 +203,34 @@ def _send_bouyomi(text: str):
 
 app = Flask(__name__)
 
+# ===== ローカルAPI保護トークン =====
+# Flask は 127.0.0.1 バインドだが、ブラウザで開いた悪意あるページからの
+# 単純POST（CSRF）や GET リンク踏みで /stop /lt_url 等を叩ける穴があるため、
+# 状態変更系エンドポイントは起動ごとに生成するトークンを必須にする。
+# GUI・オーバーレイは自動で付与。手動でブラウザから叩く場合は ?token=XXX を付ける。
+API_TOKEN = _uuid.uuid4().hex
+
+# トークン必須の GET エンドポイント（POST は一律必須）
+# ※ /test /showroom/* は手動ブラウザ操作の利便性を優先して除外（実害が軽微なため）
+_PROTECTED_GET_PREFIXES = ("/start/", "/stop", "/lt_check")
+
+@app.before_request
+def _token_guard():
+    p = flask_request.path
+    needs = (flask_request.method == "POST"
+             or any(p == pre.rstrip("/") or p.startswith(pre)
+                    for pre in _PROTECTED_GET_PREFIXES))
+    if not needs:
+        return None
+    tok = flask_request.headers.get("X-Grapro-Token") or flask_request.args.get("token")
+    if tok != API_TOKEN:
+        return jsonify({"error": "forbidden",
+                        "message": "APIトークンが必要です（?token=XXX または X-Grapro-Token ヘッダー）"}), 403
+    return None
+
 # ===== オーバーレイ設定（サーバー側永続化） =====
-_SETTINGS_FILE = "overlay_settings.json"
+# CWD相対だと起動方法（OBS自動起動・管理者実行等）で保存場所が変わるため exe 隣接に固定
+_SETTINGS_FILE = os.path.join(BASE_DIR, "overlay_settings.json")
 _DEFAULT_SETTINGS = {
     "bodyBg":        "transparent",
     "msgBg":         "rgba(0,0,0,0.88)",
@@ -208,7 +251,6 @@ _overlay_settings = dict(_DEFAULT_SETTINGS)
 def _load_settings():
     global _overlay_settings
     try:
-        import os
         if os.path.exists(_SETTINGS_FILE):
             with open(_SETTINGS_FILE, "r", encoding="utf-8") as f:
                 saved = _json.load(f)
@@ -236,6 +278,11 @@ except Exception:
     Retry = None
 
 _TRANSLATE_SESSION = requests.Session()
+# Cloudflare は非ブラウザ UA をブロックすることがあるためブラウザ型 UA を付与
+_TRANSLATE_SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  f"GRAPRO-Translator/{VERSION}",
+})
 if Retry is not None:
     try:
         _retry = Retry(total=2, backoff_factor=0.5,
@@ -268,13 +315,20 @@ _DEEPL_TARGET_MAP = {
 
 
 def _translate_libretranslate(text, source_lang):
-    """LibreTranslate で翻訳"""
+    """LibreTranslate で翻訳。source="auto" 対応。
+    戻り値: (translated_text, detected_lang)
+    """
     resp = _TRANSLATE_SESSION.post(LIBRETRANSLATE_URL, json={
-        "q": text, "source": source_lang, "target": TARGET_LANG, "format": "text",
-        "api_key": LIBRETRANSLATE_API_KEY,
+        "q": text, "source": source_lang or "auto", "target": TARGET_LANG,
+        "format": "text", "api_key": LIBRETRANSLATE_API_KEY,
     }, timeout=5)
     if resp.status_code == 200:
-        return resp.json().get("translatedText", text)
+        data = resp.json()
+        detected = source_lang
+        dl = data.get("detectedLanguage")
+        if isinstance(dl, dict):
+            detected = dl.get("language", source_lang)
+        return data.get("translatedText", text), detected
     raise RuntimeError(f"LibreTranslate HTTP {resp.status_code}: {resp.text[:200]}")
 
 
@@ -334,36 +388,50 @@ _ENGINES = {
 
 _last_translate_error = None          # 直近のエラー（診断用）
 _server_notification = None           # サーバーからの通知 {"type": "warn"|"rate_limit"|"blocked", "message": "..."}
-_logged_unsupported = set()           # ログ済み非対応言語（スパム防止）
+
+# 翻訳結果キャッシュ（"GG" "ｗｗｗ" 等の頻出コメント再翻訳を防いでAPIコスト削減）
+_TRANS_CACHE_MAX = 500
+_trans_cache = OrderedDict()          # text -> (translated, detected_lang)
+_trans_cache_lock = threading.Lock()
 
 def translate_text(text, source_lang):
-    """翻訳API に投げる。Azure は (translated, detected_lang) を返す。
+    """翻訳API に投げる。成功結果は LRU キャッシュする。
     戻り値: (translated_text, detected_lang)
     """
     global _last_translate_error
-    # LibreTranslate用フォールバック
-    if TRANSLATE_ENGINE == "libretranslate" and source_lang not in _LT_SUPPORTED:
-        if source_lang not in _logged_unsupported:
-            _logged_unsupported.add(source_lang)
-            print(f"[翻訳スキップ] 非対応言語 '{source_lang}' → 原文のまま表示")
-        return text, source_lang
+    # キャッシュヒット（エンジン切替時の混在を避けるためエンジン名込みでキー化）
+    cache_key = (TRANSLATE_ENGINE, text)
+    with _trans_cache_lock:
+        hit = _trans_cache.get(cache_key)
+        if hit is not None:
+            _trans_cache.move_to_end(cache_key)
+            return hit
     engine_fn = _ENGINES.get(TRANSLATE_ENGINE, _translate_grapro)
     try:
         result = engine_fn(text, source_lang)
         _last_translate_error = None
-        # Azure は (text, lang) を返す。他は text のみ
+        # tuple なら (text, detected_lang)、str なら検出言語なし
         if isinstance(result, tuple):
-            return result
-        return result, source_lang
+            translated, detected = result
+        else:
+            translated, detected = result, source_lang
+        # 成功時のみキャッシュ（レート制限等で原文が返ったケースは除外）
+        if translated != text:
+            with _trans_cache_lock:
+                _trans_cache[cache_key] = (translated, detected)
+                _trans_cache.move_to_end(cache_key)
+                while len(_trans_cache) > _TRANS_CACHE_MAX:
+                    _trans_cache.popitem(last=False)
+        return translated, detected
     except Exception as e:
         _last_translate_error = str(e)
         print(f"[翻訳エラー][{TRANSLATE_ENGINE}] {e}")
         # GRAPRO 失敗時は LibreTranslate へ自動フォールバック（原文表示よりマシ）
         if engine_fn is _translate_grapro:
             try:
-                fb = _translate_libretranslate(text, source_lang or "auto")
+                fb, detected = _translate_libretranslate(text, source_lang or "auto")
                 print("[翻訳フォールバック] LibreTranslate で翻訳成功")
-                return fb, source_lang
+                return fb, detected
             except Exception as e2:
                 print(f"[翻訳フォールバック失敗] {e2}")
     return text, source_lang
@@ -384,21 +452,16 @@ _EMOJI_ONLY = _re.compile(
     r']+$'
 )
 
-# LibreTranslate がサポートする言語コード（軽量判定用）
-_LT_SUPPORTED = {
-    "ar","az","bg","bn","ca","cs","da","de","el","en","eo","es","et",
-    "fa","fi","fr","ga","he","hi","hu","id","it","ja","ko","lt","lv",
-    "ms","nb","nl","pl","pt","ro","ru","sk","sl","sq","sr","sv",
-    "th","tl","tr","uk","ur","vi","zh",
-}
-
 def detect_language(text):
     """基本フィルタのみ。言語検出は翻訳API側に委任。
-    Returns: "auto" (翻訳APIに投げる) / TARGET_LANG (翻訳不要) / None (表示しない)
+    Returns: "auto" (翻訳APIに投げる) / TARGET_LANG (翻訳不要・表示のみ) / None (表示しない)
     """
     stripped = text.strip()
-    if len(stripped) < MIN_CHARS:
+    if not stripped:
         return None
+    # 短いコメント（"GG" 等）は翻訳せず原文のまま表示（以前は非表示だった）
+    if len(stripped) < MIN_CHARS:
+        return TARGET_LANG
     # 絵文字・記号のみのコメントは翻訳不要（日本語扱いにして表示だけする）
     if _EMOJI_ONLY.match(stripped):
         return TARGET_LANG
@@ -433,7 +496,8 @@ def translation_worker():
                      ("isVip","twitchColor","subMonths","isFirstMsg",
                       "isNotice","noticeType","noticeMsg") if k in item}
 
-            base = {"author": author, "imageUrl": imageUrl, "badgeUrl": badgeUrl,
+            base = {"id": next(_MSG_COUNTER),
+                    "author": author, "imageUrl": imageUrl, "badgeUrl": badgeUrl,
                     "lang": lang, "isMember": isMember, "isMod": isMod,
                     "isOwner": isOwner, **extra}
 
@@ -633,11 +697,15 @@ def _twitch_chat_worker(channel):
             print(f"[Twitch] IRC接続成功 (tags+commands有効)")
             retry = 0
             buf = ""
+            reconnect = False
             sock.settimeout(1)
-            while not stop_event.is_set():
+            while not stop_event.is_set() and not reconnect:
                 try:
                     data = sock.recv(4096).decode("utf-8", errors="replace")
                     if not data:
+                        # サーバー側からの切断 → バックオフして再接続
+                        print("[Twitch] サーバーから切断されました")
+                        reconnect = True
                         break
                     buf += data
                     while "\r\n" in buf:
@@ -646,6 +714,11 @@ def _twitch_chat_worker(channel):
                         if line.startswith("PING"):
                             sock.send(f"PONG {line[5:]}\r\n".encode("utf-8"))
                             continue
+                        # サーバーからの再接続要求（メンテナンス等）
+                        if line.startswith(":tmi.twitch.tv RECONNECT"):
+                            print("[Twitch] サーバーから RECONNECT 要求")
+                            reconnect = True
+                            break
                         # タグをパース（共通処理）
                         tags_str = ""
                         rest = line
@@ -723,6 +796,11 @@ def _twitch_chat_worker(channel):
                             })
                 except _socket.timeout:
                     continue
+            # 正常切断/RECONNECT 要求後もバックオフを挟む（即時再接続の連打防止）
+            if not stop_event.is_set():
+                retry += 1
+                print(f"[Twitch] 再接続します retry={retry}")
+                _reconnect_wait(retry)
         except Exception as e:
             print(f"[Twitch エラー] {e}")
             if not stop_event.is_set():
@@ -741,7 +819,7 @@ def _twitch_chat_worker(channel):
 # ツイキャスAPI設定
 _TWITCASTING_CLIENT_ID     = os.environ.get("TWITCASTING_CLIENT_ID", "")
 _TWITCASTING_CLIENT_SECRET = os.environ.get("TWITCASTING_CLIENT_SECRET", "")
-_TWITCASTING_TOKEN_FILE    = "twitcasting_token.json"
+_TWITCASTING_TOKEN_FILE    = os.path.join(BASE_DIR, "twitcasting_token.json")
 
 def _twitcasting_get_token():
     """保存済みトークンを読み込む。なければ None"""
@@ -758,55 +836,88 @@ def _twitcasting_save_token(token):
     with open(_TWITCASTING_TOKEN_FILE, "w") as f:
         _json.dump({"access_token": token}, f)
 
+def _twitcasting_fetch_token():
+    """Client Credentials フローで新規トークンを取得・保存。失敗時 None"""
+    if not (_TWITCASTING_CLIENT_ID and _TWITCASTING_CLIENT_SECRET):
+        return None
+    try:
+        import base64
+        cred = base64.b64encode(
+            f"{_TWITCASTING_CLIENT_ID}:{_TWITCASTING_CLIENT_SECRET}".encode()
+        ).decode()
+        r = requests.post("https://apiv2.twitcasting.tv/oauth2/access_token",
+                          headers={"Authorization": f"Basic {cred}"},
+                          data={"grant_type": "client_credentials"}, timeout=10)
+        if r.ok:
+            token = r.json().get("access_token")
+            if token:
+                _twitcasting_save_token(token)
+                return token
+    except Exception as e:
+        print(f"[ツイキャス] トークン取得失敗: {e}")
+    return None
+
+def _twitcasting_delete_token():
+    """失効トークンのファイルを破棄"""
+    try:
+        if os.path.exists(_TWITCASTING_TOKEN_FILE):
+            os.remove(_TWITCASTING_TOKEN_FILE)
+    except:
+        pass
+
 def _twitcasting_get_movie_id(user_id, token):
-    """ユーザーの現在のライブ配信IDを取得"""
+    """ユーザーの現在のライブ配信IDを取得。
+    戻り値: (movie_id or None, unauthorized: bool)"""
     headers = {"Authorization": f"Bearer {token}"}
     r = requests.get(f"https://apiv2.twitcasting.tv/users/{user_id}/current_live",
                      headers=headers, timeout=10)
     if r.ok:
         data = r.json()
         movie = data.get("movie", {})
-        return str(movie.get("id", ""))
-    return None
+        return str(movie.get("id", "")), False
+    return None, r.status_code == 401
+
+def _twitcasting_system_message(text, notice):
+    """オーバーレイにシステム通知を1件表示"""
+    with messages_lock:
+        chat_messages.insert(0, {
+            "id": next(_MSG_COUNTER),
+            "author": "システム",
+            "original": text,
+            "translated": None,
+            "lang": "ja", "imageUrl": "", "badgeUrl": "",
+            "isMember": False, "isMod": False, "isOwner": False,
+            "isNotice": True, "noticeType": "system",
+            "noticeMsg": notice,
+        })
+
 
 def _twitcasting_chat_worker(user_id):
     """ツイキャス API v2 でコメント取得 → 翻訳キューへ投入"""
-    token = _twitcasting_get_token()
+    token = _twitcasting_get_token() or _twitcasting_fetch_token()
     if not token:
-        if _TWITCASTING_CLIENT_ID and _TWITCASTING_CLIENT_SECRET:
-            # Basic認証でアクセストークン取得
-            import base64
-            cred = base64.b64encode(
-                f"{_TWITCASTING_CLIENT_ID}:{_TWITCASTING_CLIENT_SECRET}".encode()
-            ).decode()
-            r = requests.post("https://apiv2.twitcasting.tv/oauth2/access_token",
-                              headers={"Authorization": f"Basic {cred}"},
-                              data={"grant_type": "client_credentials"}, timeout=10)
-            if r.ok:
-                token = r.json().get("access_token")
-                if token:
-                    _twitcasting_save_token(token)
-        if not token:
-            print("[ツイキャス] APIトークンが未設定です。環境変数 TWITCASTING_CLIENT_ID / TWITCASTING_CLIENT_SECRET を設定してください")
-            # オーバーレイに通知メッセージを表示
-            # （旧実装は未定義変数 messages を参照しており NameError でスレッドが落ちていた）
-            with messages_lock:
-                chat_messages.insert(0, {
-                    "author": "システム",
-                    "original": "⚠ ツイキャスのAPI設定が必要です（設定 → 詳細はドキュメント参照）",
-                    "translated": None,
-                    "lang": "ja", "imageUrl": "", "badgeUrl": "",
-                    "isMember": False, "isMod": False, "isOwner": False,
-                    "isNotice": True, "noticeType": "system",
-                    "noticeMsg": "ツイキャスAPI未設定: ClientID/SecretをGRAPRO設定で登録してください",
-                })
-            return
+        print("[ツイキャス] APIトークンが未設定です。環境変数 TWITCASTING_CLIENT_ID / TWITCASTING_CLIENT_SECRET を設定してください")
+        _twitcasting_system_message(
+            "⚠ ツイキャスのAPI設定が必要です（設定 → 詳細はドキュメント参照）",
+            "ツイキャスAPI未設定: ClientID/SecretをGRAPRO設定で登録してください")
+        return
 
     print(f"[ツイキャス] user_id={user_id}")
     retry = 0
     while not stop_event.is_set():
         try:
-            movie_id = _twitcasting_get_movie_id(user_id, token)
+            movie_id, unauthorized = _twitcasting_get_movie_id(user_id, token)
+            if unauthorized:
+                # トークン失効 → 破棄して再取得（旧実装は失効後に無限リトライしていた）
+                print("[ツイキャス] トークン失効を検出 → 再取得します")
+                _twitcasting_delete_token()
+                token = _twitcasting_fetch_token()
+                if not token:
+                    _twitcasting_system_message(
+                        "⚠ ツイキャスAPIトークンの再取得に失敗しました",
+                        "ツイキャスAPI認証失敗: ClientID/Secretを確認してください")
+                    return
+                continue
             if not movie_id:
                 print(f"[ツイキャス] ライブ配信が見つかりません retry={retry+1}")
                 retry += 1
@@ -822,6 +933,11 @@ def _twitcasting_chat_worker(user_id):
                     params["slice_id"] = last_id
                 r = requests.get(f"https://apiv2.twitcasting.tv/movies/{movie_id}/comments",
                                  headers=headers, params=params, timeout=10)
+                if r.status_code == 401:
+                    print("[ツイキャス] コメント取得中にトークン失効 → 再取得")
+                    _twitcasting_delete_token()
+                    token = _twitcasting_fetch_token()
+                    break
                 if not r.ok:
                     print(f"[ツイキャス] API応答エラー status={r.status_code}")
                     break
@@ -911,8 +1027,15 @@ def chat_worker(video_id):
 
 # ===== アップデートチェック =====
 
-_GITHUB_REPO = "donutrobotics/GRAPRO-TRANSLATOR"  # 公開リポジトリ
+_GITHUB_REPO = "yakizakanateisyoku/GRAPRO-TRANSLATOR"  # 公開リポジトリ
 _latest_version = None  # 最新バージョン（チェック済み）
+
+def _ver_tuple(v):
+    """"1.4.1" → (1, 4, 1)。比較用"""
+    try:
+        return tuple(int(x) for x in _re.findall(r"\d+", v)[:3])
+    except:
+        return (0,)
 
 def check_update():
     """GitHub Releases APIで最新バージョンを確認"""
@@ -923,7 +1046,8 @@ def check_update():
         if r.ok:
             tag = r.json().get("tag_name", "")
             latest = tag.lstrip("vV")
-            if latest and latest != VERSION:
+            # 単純な != 比較だと開発版(現行>公開)でも通知が出るため大小比較にする
+            if latest and _ver_tuple(latest) > _ver_tuple(VERSION):
                 _latest_version = latest
                 print(f"[アップデート] 新しいバージョン v{latest} が利用可能です")
             else:
@@ -1007,30 +1131,30 @@ OVERLAY_HTML = r"""<!DOCTYPE html>
   *{margin:0;padding:0;box-sizing:border-box}
   body{background:var(--body-bg);font-family:var(--text-font);overflow-x:hidden}
   #messages{position:fixed;bottom:16px;left:16px;right:16px;display:flex;flex-direction:column-reverse;gap:6px;max-height:90vh;overflow:hidden}
-  .msg{background:var(--msg-bg);border-radius:8px;padding:8px 14px;color:var(--text-color);font-family:var(--text-font);font-size:var(--text-size);line-height:1.6;animation:fadein 0.35s ease;word-break:break-word;text-shadow:0 1px 3px rgba(0,0,0,0.8)}
+  .msg{background:var(--msg-bg);border-radius:8px;padding:8px 14px;color:var(--text-color);font-family:var(--text-font);font-size:var(--text-size);font-weight:600;line-height:1.6;animation:fadein 0.35s ease;word-break:break-word;text-shadow:0 1px 3px rgba(0,0,0,0.8)}
   .msg.translated{border-left:4px solid var(--accent-translated)}
   .msg.japanese{border-left:4px solid var(--accent-japanese)}
   .meta{display:flex;align-items:center;gap:6px;margin-bottom:4px}
   .avatar{width:22px;height:22px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1px solid rgba(255,255,255,0.3)}
   .author{color:var(--author-color);font-family:var(--author-font);font-weight:bold;font-size:var(--author-size)}
-  .lang-badge{font-size:11px;background:var(--accent-translated);color:#003;border-radius:4px;padding:1px 7px;font-weight:bold;text-shadow:none !important;display:inline-block}
-  .badge-member{font-size:10px;background:#2ecc71;color:#000;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
-  .badge-mod{font-size:10px;background:#5865f2;color:#fff;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
-  .badge-owner{font-size:10px;background:#f1c40f;color:#000;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
-  .badge-vip{font-size:10px;background:#e005b9;color:#fff;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
-  .badge-first{font-size:10px;background:#f97316;color:#fff;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
-  .badge-months{font-size:10px;background:#9b59b6;color:#fff;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
+  .lang-badge{font-size:12px;background:var(--accent-translated);color:#003;border-radius:4px;padding:1px 7px;font-weight:bold;text-shadow:none !important;display:inline-block}
+  .badge-member{font-size:12px;background:#2ecc71;color:#000;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
+  .badge-mod{font-size:12px;background:#5865f2;color:#fff;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
+  .badge-owner{font-size:12px;background:#f1c40f;color:#000;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
+  .badge-vip{font-size:12px;background:#e005b9;color:#fff;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
+  .badge-first{font-size:12px;background:#f97316;color:#fff;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
+  .badge-months{font-size:12px;background:#9b59b6;color:#fff;border-radius:3px;padding:1px 5px;font-weight:bold;text-shadow:none}
   .msg.notice{border-left:4px solid #e005b9;background:rgba(80,0,60,0.85)}
-  .translated-text{color:var(--text-color);font-family:var(--text-font);font-size:var(--text-size)}
-  .original{color:var(--original-color);font-size:13px;margin-top:3px}
+  .translated-text{color:var(--text-color);font-family:var(--text-font);font-size:var(--text-size);font-weight:600}
+  .original{color:var(--original-color);font-size:13px;font-weight:600;margin-top:3px}
   @keyframes fadein{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-  #hype-badge{position:fixed;top:8px;left:8px;background:rgba(20,20,25,0.85);border:1px solid #ff6b6b;border-radius:8px;padding:6px 14px;color:#fff;font-family:'Meiryo','Noto Sans JP',sans-serif;font-size:14px;z-index:998;display:none;align-items:center;gap:8px;backdrop-filter:blur(4px)}
+  #hype-badge{position:fixed;top:8px;left:8px;background:rgba(20,20,25,0.85);border:1px solid #ff6b6b;border-radius:8px;padding:6px 14px;color:#fff;font-family:'Meiryo','Noto Sans JP',sans-serif;font-size:14px;font-weight:600;z-index:998;display:none;align-items:center;gap:8px;backdrop-filter:blur(4px)}
   #hype-badge.visible{display:flex}
   #hype-badge .hype-num{font-size:22px;font-weight:bold;color:#ff6b6b;font-variant-numeric:tabular-nums}
-  #hype-badge .hype-label{font-size:11px;color:#aaa}
+  #hype-badge .hype-label{font-size:12px;font-weight:600;color:#aaa}
   #gear{position:fixed;top:8px;right:8px;width:32px;height:32px;background:rgba(60,60,60,0.7);border:none;border-radius:50%;color:#ccc;font-size:18px;cursor:pointer;z-index:1000;display:flex;align-items:center;justify-content:center;transition:background 0.2s,transform 0.3s}
   #gear:hover{background:rgba(100,100,100,0.9);transform:rotate(45deg)}
-  #panel{display:none;position:fixed;top:0;right:0;width:320px;height:100vh;background:rgba(20,20,25,0.96);z-index:999;overflow-y:auto;padding:16px;color:#ddd;font-family:'Meiryo','Noto Sans JP',sans-serif;font-size:13px;border-left:1px solid #333}
+  #panel{display:none;position:fixed;top:0;right:0;width:320px;height:100vh;background:rgba(20,20,25,0.96);z-index:999;overflow-y:auto;padding:16px;color:#ddd;font-family:'Meiryo','Noto Sans JP',sans-serif;font-size:13px;font-weight:600;border-left:1px solid #333}
   #panel.open{display:block}
   #panel h3{color:#fff;font-size:15px;margin:0 0 12px;border-bottom:1px solid #444;padding-bottom:6px}
   .sgroup{margin-bottom:14px}
@@ -1038,7 +1162,7 @@ OVERLAY_HTML = r"""<!DOCTYPE html>
   .sgroup input[type=color]{width:40px;height:28px;border:1px solid #555;background:#222;cursor:pointer;vertical-align:middle}
   .sgroup input[type=range]{width:120px;vertical-align:middle}
   .sgroup select{background:#222;color:#ddd;border:1px solid #555;padding:3px 6px;font-size:12px}
-  .sgroup .val{color:#888;font-size:11px;margin-left:4px}
+  .sgroup .val{color:#888;font-size:12px;margin-left:4px}
   .srow{display:flex;align-items:center;gap:8px;margin-bottom:6px}
   #panel .btn-row{display:flex;gap:8px;margin-top:12px}
   #panel button{background:#333;color:#ccc;border:1px solid #555;border-radius:4px;padding:5px 14px;font-size:12px;cursor:pointer}
@@ -1046,7 +1170,7 @@ OVERLAY_HTML = r"""<!DOCTYPE html>
   #panel button.primary{background:#29b6f6;color:#000;border-color:#29b6f6}
   #panel button.primary:hover{background:#4fc3f7}
   .tabs{display:flex;gap:2px;margin-bottom:12px;border-bottom:1px solid #444;padding-bottom:0}
-  .tab{background:#222;color:#888;border:none;border-radius:4px 4px 0 0;padding:5px 10px;font-size:11px;cursor:pointer}
+  .tab{background:#222;color:#888;border:none;border-radius:4px 4px 0 0;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer}
   .tab.active{background:#29b6f6;color:#000;font-weight:bold}
   .tab-content{display:none}
   .tab-content.active{display:block}
@@ -1161,6 +1285,7 @@ OVERLAY_HTML = r"""<!DOCTYPE html>
 </div>
 <div id="messages"></div>
 <script>
+const TOKEN='{{ token }}';   /* 設定保存等の状態変更APIに必要（サーバーが埋め込む） */
 const R=document.documentElement.style;
 function applyCSS(s){
   R.setProperty('--body-bg',s.bodyBg||'transparent');
@@ -1264,7 +1389,7 @@ document.getElementById('btnSave').addEventListener('click',async()=>{
   const s=readForm();
   CFG=Object.assign({},DEFAULTS,s);
   try{
-    await fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(s)});
+    await fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json','X-Grapro-Token':TOKEN},body:JSON.stringify(s)});
     document.getElementById('btnSave').textContent='\u4fdd\u5b58\u3057\u307e\u3057\u305f!';
     setTimeout(()=>document.getElementById('btnSave').textContent='\u4fdd\u5b58',1500);
   }catch(e){alert('\u4fdd\u5b58\u5931\u6557: '+e);}
@@ -1284,7 +1409,7 @@ initSettings();
 let maxShow=5;
 const box=document.getElementById('messages');
 const liveEls=new Map();
-function msgKey(m){return m.author+'\0'+m.original;}
+function msgKey(m){return m.id!==undefined?String(m.id):m.author+'\0'+m.original;}
 function mkEl(m){
   const a=esc(m.author),o=esc(m.original);
   const d=document.createElement('div');
@@ -1328,7 +1453,7 @@ async function poll(){
   }catch(e){}
   setTimeout(poll,1000);
 }
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function avatar(m){
   if(!CFG.ytShowAvatar)return '';
   return m.imageUrl?`<img class="avatar" src="${esc(m.imageUrl)}" onerror="this.style.display='none'">`:'';
@@ -1344,8 +1469,10 @@ function badges(m){
   if(m.subMonths>0&&CFG.twShowSubMonths)b+=`<span class="badge-months">${m.subMonths}ヶ月</span>`;
   return b;
 }
-const LANG={af:'アフリカーンス語',ar:'アラビア語',az:'アゼルバイジャン語',bg:'ブルガリア語',bn:'ベンガル語',ca:'カタルーニャ語',cs:'チェコ語',da:'デンマーク語',de:'ドイツ語',el:'ギリシャ語',en:'英語',eo:'エスペラント語',es:'スペイン語',et:'エストニア語',fa:'ペルシャ語',fi:'フィンランド語',fr:'フランス語',he:'ヘブライ語',hi:'ヒンディー語',hu:'ハンガリー語',id:'インドネシア語',it:'イタリア語',ko:'韓国語',lt:'リトアニア語',lv:'ラトビア語',ms:'マレー語',nl:'オランダ語',pl:'ポーランド語',pt:'ポルトガル語','pt-br':'ポルトガル語(BR)',ro:'ルーマニア語',ru:'ロシア語',sk:'スロバキア語',sl:'スロベニア語',sq:'アルバニア語',sv:'スウェーデン語',th:'タイ語',tl:'タガログ語',tr:'トルコ語',uk:'ウクライナ語',ur:'ウルドゥー語',vi:'ベトナム語',zh:'中国語','zh-cn':'中国語','zh-hans':'中国語(簡体)','zh-tw':'中国語(繁体)','zh-hant':'中国語(繁体)'};
-function langName(c){return LANG[c.toLowerCase()]||c;}
+/* 言語名マップはサーバー(main.py の LANG_NAMES)から取得して一元管理 */
+let LANG={};
+fetch('/langs').then(r=>r.json()).then(d=>{LANG=d;}).catch(e=>{});
+function langName(c){return LANG[String(c||'').toLowerCase()]||c;}
 /* SHOWROOM hype */
 const hypeBadge=document.getElementById('hype-badge');
 const hypeNum=document.getElementById('hypeNum');
@@ -1368,13 +1495,20 @@ poll();
 
 @app.route('/')
 def index():
-    return render_template_string(OVERLAY_HTML)
+    return render_template_string(OVERLAY_HTML, token=API_TOKEN)
+
+@app.route('/langs')
+def langs():
+    """言語コード→日本語名マップ（オーバーレイ/GUIが参照。一元管理）"""
+    return jsonify(LANG_NAMES)
 
 @app.route('/settings', methods=['GET', 'POST'])
 def overlay_settings():
     global _overlay_settings
     if flask_request.method == 'POST':
-        data = flask_request.get_json(force=True)
+        data = flask_request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"status": "error", "message": "JSON body required"}), 400
         _overlay_settings.update(data)
         _save_settings()
         return jsonify({"status": "ok"})
@@ -1391,8 +1525,11 @@ def start_chat(video_id):
     stop_event.clear()
     # キューをフラッシュ
     while not translation_q.empty():
-        try: translation_q.get_nowait()
-        except: break
+        try:
+            translation_q.get_nowait()
+            translation_q.task_done()
+        except:
+            break
     # ワーカーが死んでいたら再起動
     if not worker_threads or not any(t.is_alive() for t in worker_threads):
         start_workers()
@@ -1435,12 +1572,14 @@ def status():
 @app.route('/test_batch', methods=['POST'])
 def test_batch():
     """デモモード用: GUIからのバッチ注入"""
-    data = flask_request.get_json(force=True)
+    data = flask_request.get_json(silent=True)
     if not isinstance(data, list):
         return jsonify({"error": "list required"}), 400
     with messages_lock:
         chat_messages.clear()
         for m in reversed(data):
+            if isinstance(m, dict) and "id" not in m:
+                m = {**m, "id": next(_MSG_COUNTER)}
             chat_messages.insert(0, m)
     return jsonify({"status": "ok", "count": len(data)})
 
@@ -1457,7 +1596,7 @@ def test_inject():
     with messages_lock:
         chat_messages.clear()
         for s in reversed(samples):
-            chat_messages.insert(0, s)
+            chat_messages.insert(0, {**s, "id": next(_MSG_COUNTER)})
     return jsonify({"status": "ok", "injected": len(samples)})
 
 @app.route('/showroom/start/<int:room_id>')
@@ -1474,6 +1613,26 @@ def showroom_stop_route():
 def showroom_hype():
     with _showroom_lock:
         return jsonify(dict(_showroom_data))
+
+GRAPRO_HEALTH_URL = "https://lt.f1234k.com/relay/health"
+
+@app.route('/api_health')
+def api_health():
+    """軽量ヘルスチェック（実翻訳しない＝翻訳API課金なし）。
+    GUI の定期ポーリングはこちらを使う。実翻訳の /lt_check は起動時・エンジン切替時のみ。"""
+    try:
+        if TRANSLATE_ENGINE == "grapro":
+            r = _TRANSLATE_SESSION.get(GRAPRO_HEALTH_URL, timeout=5)
+            ok = r.ok
+        elif TRANSLATE_ENGINE == "libretranslate":
+            base = LIBRETRANSLATE_URL.rsplit("/", 1)[0]
+            r = _TRANSLATE_SESSION.get(f"{base}/languages", timeout=5)
+            ok = r.ok
+        else:  # deepl: キー未設定なら明確にエラー扱い
+            ok = bool(DEEPL_API_KEY)
+        return jsonify({"status": "ok" if ok else "error", "engine": TRANSLATE_ENGINE})
+    except Exception as e:
+        return jsonify({"status": "error", "engine": TRANSLATE_ENGINE, "error": str(e)})
 
 @app.route('/lt_check')
 def lt_check():
@@ -1506,7 +1665,7 @@ def bouyomi():
     global _bouyomi_enabled, _bouyomi_port
     if flask_request.method == 'GET':
         return jsonify({"enabled": _bouyomi_enabled, "port": _bouyomi_port})
-    data = flask_request.get_json(force=True)
+    data = flask_request.get_json(silent=True) or {}
     if "enabled" in data:
         _bouyomi_enabled = bool(data["enabled"])
     if "port" in data:
@@ -1519,7 +1678,7 @@ def lt_url():
     global LIBRETRANSLATE_URL, TRANSLATE_ENGINE
     if flask_request.method == 'GET':
         return jsonify({"url": LIBRETRANSLATE_URL, "engine": TRANSLATE_ENGINE})
-    data = flask_request.get_json(force=True)
+    data = flask_request.get_json(silent=True) or {}
     # エンジン切替
     new_engine = data.get("engine", "").strip()
     if new_engine and new_engine in _ENGINES:
@@ -1540,9 +1699,10 @@ def lt_url():
 # ===== クライアントID =====
 
 def _get_client_id():
-    """config.json から worker_id を取得。なければ新規発行して保存"""
-    import uuid
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    """config.json から worker_id を取得。なければ新規発行して保存。
+    ※ __file__ 基準だと PyInstaller onefile で一時フォルダに書いてしまい
+      起動ごとに ID が変わる（レート制限・ブロックが無効化される）ため BASE_DIR 基準。"""
+    cfg_path = os.path.join(BASE_DIR, "config.json")
     cfg = {}
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
@@ -1550,7 +1710,7 @@ def _get_client_id():
     except: pass
     wid = cfg.get("worker_id")
     if not wid:
-        wid = str(uuid.uuid4())
+        wid = str(_uuid.uuid4())
         cfg["worker_id"] = wid
         try:
             with open(cfg_path, "w", encoding="utf-8") as f:
@@ -1570,14 +1730,15 @@ def client_id():
 # ===== エントリーポイント =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("OBS YouTube 翻訳ツール")
+    print(f"GRAPRO-TRANSLATOR v{VERSION}")
     print(f"翻訳エンジン  : {TRANSLATE_ENGINE}")
     print(f"オーバーレイ  : http://localhost:{OVERLAY_PORT}/")
-    print(f"チャット開始  : http://localhost:{OVERLAY_PORT}/start/<video_id>")
-    print(f"停止          : http://localhost:{OVERLAY_PORT}/stop")
+    print(f"チャット開始  : http://localhost:{OVERLAY_PORT}/start/<video_id>?token=<TOKEN>")
+    print(f"停止          : http://localhost:{OVERLAY_PORT}/stop?token=<TOKEN>")
     print(f"ステータス    : http://localhost:{OVERLAY_PORT}/status")
     print(f"UIテスト      : http://localhost:{OVERLAY_PORT}/test")
-    print(f"疎通確認      : http://localhost:{OVERLAY_PORT}/lt_check")
+    print(f"疎通確認      : http://localhost:{OVERLAY_PORT}/lt_check?token=<TOKEN>")
+    print(f"APIトークン   : {API_TOKEN}")
     print("=" * 50)
 
     # ワーカー起動

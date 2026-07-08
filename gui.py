@@ -49,6 +49,28 @@ try:
 except Exception as _e:
     print(f"[dev_logger] enable failed: {_e!r}")
 
+# 二重起動チェック（ポート使用中なら Flask スレッドだけ静かに死んで
+# 「接続エラー」になるだけで原因が分からないため、明示的に知らせて終了する）
+def _port_in_use(port):
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+if _port_in_use(translator.OVERLAY_PORT):
+    try:
+        from tkinter import messagebox as _mb
+        _root = tk.Tk(); _root.withdraw()
+        _mb.showerror(
+            "GRAPRO-TRANSLATOR",
+            f"ポート {translator.OVERLAY_PORT} が既に使用されています。\n\n"
+            "GRAPRO-TRANSLATOR が既に起動していないか確認してください。\n"
+            "（タスクトレイ・タスクマネージャーを確認）")
+        _root.destroy()
+    except Exception:
+        pass
+    sys.exit(0)
+
 # Flask をバックグラウンドで起動
 def _start_flask():
     import logging; logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -69,6 +91,8 @@ ACC      = "#29b6f6"
 
 # 接続を再利用してTIME_WAIT枯渇を防ぐ
 SESSION = requests.Session()
+# ローカルAPI保護トークン（main.py 起動時に生成）を全リクエストに自動付与
+SESSION.headers.update({"X-Grapro-Token": translator.API_TOKEN})
 
 # アバター画像キャッシュ
 _avatar_cache = {}
@@ -95,13 +119,8 @@ def fetch_avatar(url, size=22):
     except:
         return None
 
-LANG = {
-    "en":"英語","ko":"韓国語","zh-cn":"中国語","zh":"中国語","zh-hans":"中国語(簡体)",
-    "zh-tw":"中国語(繁体)","zh-hant":"中国語(繁体)","ru":"ロシア語","fr":"フランス語",
-    "de":"ドイツ語","es":"スペイン語","pt":"ポルトガル語","ar":"アラビア語","ja":"日本語",
-    "it":"イタリア語","nl":"オランダ語","pl":"ポーランド語","tr":"トルコ語","uk":"ウクライナ語",
-    "vi":"ベトナム語","th":"タイ語","id":"インドネシア語","hi":"ヒンディー語",
-}
+# 言語名マップは main.py の LANG_NAMES を参照して一元管理（3重定義の乖離防止）
+LANG = translator.LANG_NAMES
 
 
 class App(ctk.CTk):
@@ -117,7 +136,8 @@ class App(ctk.CTk):
         self._streaming = False
         self._build()
         self._poll()
-        self._check_lt()
+        self._check_lt()                          # 起動時のみ実翻訳で疎通確認
+        self.after(30000, self._poll_api_health)  # 以降は軽量ヘルスチェック（課金なし）
         self._poll_server_notification()
         self._check_update()
 
@@ -695,14 +715,17 @@ class App(ctk.CTk):
         ctk.CTkLabel(engine_area, text="高精度・言語自動検出。Azure中継サーバー経由",
                      text_color="#999999", font=ctk.CTkFont("Meiryo",9),
                      fg_color="transparent").pack(anchor="w", padx=28, pady=(0,2))
-        ctk.CTkRadioButton(engine_area, text="DeepL（非常用）",
-                           variable=engine_var, value="deepl",
-                           font=ctk.CTkFont("Meiryo",11),
-                           fg_color=ACC, hover_color="#4fc3f7",
-                           command=_on_engine_change).pack(anchor="w", padx=4, pady=(2,0))
-        ctk.CTkLabel(engine_area, text="高精度。月50万文字まで無料",
-                     text_color="#999999", font=ctk.CTkFont("Meiryo",9),
-                     fg_color="transparent").pack(anchor="w", padx=28, pady=(0,2))
+        # DeepL はキー入力UIが未実装（環境変数 DEEPL_API_KEY のみ）のため、
+        # キーが設定されている場合だけ選択肢を出す（キー無しで選ぶと全翻訳が失敗する）
+        if translator.DEEPL_API_KEY:
+            ctk.CTkRadioButton(engine_area, text="DeepL（非常用）",
+                               variable=engine_var, value="deepl",
+                               font=ctk.CTkFont("Meiryo",11),
+                               fg_color=ACC, hover_color="#4fc3f7",
+                               command=_on_engine_change).pack(anchor="w", padx=4, pady=(2,0))
+            ctk.CTkLabel(engine_area, text="高精度。月50万文字まで無料",
+                         text_color="#999999", font=ctk.CTkFont("Meiryo",9),
+                         fg_color="transparent").pack(anchor="w", padx=28, pady=(0,2))
         ctk.CTkRadioButton(engine_area, text="LibreTranslate",
                            variable=engine_var, value="libretranslate",
                            font=ctk.CTkFont("Meiryo",11),
@@ -970,11 +993,14 @@ class App(ctk.CTk):
             return
         self._lbl_empty.pack_forget()
 
-        for i in range(n):
+        # 全スロットを走査（range(n) だとウィンドウ縮小時に n 以降の
+        # 古いスロットが pack されたまま残留するバグがあった）
+        for i in range(len(self._slots)):
             slot = self._slots[i]
             if i < len(show):
                 m = show[i]
-                key = f"{m.get('author','')}\\0{m.get('original','')}"
+                mid = m.get("id")
+                key = str(mid) if mid is not None else f"{m.get('author','')}\\0{m.get('original','')}"
                 if key == self._slot_keys[i]:
                     if not slot["frame"].winfo_ismapped():
                         slot["frame"].pack(fill="x", pady=(0,4))
@@ -1061,7 +1087,8 @@ class App(ctk.CTk):
         self.after(1500, lambda: btn.configure(text="👎", text_color="#666666"))
 
     def _check_lt(self):
-        """翻訳API状態確認: 緑=OK / 黄=確認中 / 赤=エラー"""
+        """翻訳API疎通確認（実翻訳＝課金あり）。起動時とエンジン切替時のみ呼ぶ。
+        定期監視は _poll_api_health（翻訳しない）が担当。"""
         self.after(0, lambda: self._api_dot.configure(text_color="#f1c40f"))
         def _do():
             try:
@@ -1081,7 +1108,21 @@ class App(ctk.CTk):
                 color = "#e74c3c"
             self.after(0, lambda: self._api_dot.configure(text_color=color))
         threading.Thread(target=_do, daemon=True).start()
-        self.after(30000, self._check_lt)
+
+    def _poll_api_health(self):
+        """軽量ヘルスチェック（30秒間隔・実翻訳なし＝Azure課金なし）
+        旧実装は30秒ごとに /lt_check で "Hello world" を実翻訳しており、
+        アイドル状態でも 2,880 リクエスト/日を翻訳APIに投げていた。"""
+        def _do():
+            try:
+                r = SESSION.get(f"http://localhost:{PORT}/api_health", timeout=8)
+                data = r.json() if r.ok else {}
+                color = "#2ecc71" if data.get("status") == "ok" else "#e74c3c"
+            except:
+                color = "#e74c3c"
+            self.after(0, lambda: self._api_dot.configure(text_color=color))
+        threading.Thread(target=_do, daemon=True).start()
+        self.after(30000, self._poll_api_health)
 
     def _show_notification(self, msg, ntype="warn"):
         """通知バーを表示。ntype: warn=黄, rate_limit=橙, blocked=赤"""
@@ -1186,6 +1227,9 @@ class App(ctk.CTk):
                 msg = fg_pool[self._demo_fg_idx % len(fg_pool)]
                 self._demo_fg_idx += 1
             self._demo_is_ja = not self._demo_is_ja
+            # 安定ID付与（同一テキストの使い回しでも別コメントとして表示するため）
+            self._demo_seq = getattr(self, "_demo_seq", 0) + 1
+            msg = {**msg, "id": f"demo-{self._demo_seq}"}
             visible.insert(0, msg)
             del visible[10:]  # 無制限に伸びないよう切り詰め
             batch = visible[:5]
