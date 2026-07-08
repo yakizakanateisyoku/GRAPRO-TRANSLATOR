@@ -13,3 +13,4 @@ _*.py
 # 実行時に自動生成されるファイル（環境固有・コミットしない）
 overlay_settings.json
 twitcasting_token.json
+admin_token.txt
