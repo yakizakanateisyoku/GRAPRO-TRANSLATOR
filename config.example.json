@@ -1,0 +1,10 @@
+{
+  "my_channels": {
+    "youtube": "",
+    "twitch": "",
+    "twitcasting": ""
+  },
+  "bouyomi_enabled": false,
+  "bouyomi_port": 50001,
+  "developer_mode": false
+}
