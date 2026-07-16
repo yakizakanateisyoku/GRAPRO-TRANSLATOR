@@ -1,0 +1,52 @@
+name: Claude Code Review
+
+# 起動条件:
+#   1) PR / Issue / PRレビュー / PRレビューコメントで `@claude` をメンションしたとき
+#   2) GitHub Actions の "Run workflow" ボタンから手動実行
+# ※ "作業完了！" のような自然言語トリガーで動かしたい場合は、
+#   PR or Issue コメントに `@claude 作業完了` などと書けば発火します。
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned]
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "Claude に渡す指示（任意）"
+        required: false
+        default: "このリポジトリの最新コミットをレビューして、改善点があればコメントしてください。"
+
+jobs:
+  claude:
+    # @claude メンションを含むコメント or 手動実行のときだけ動く（コスト節約）
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Claude Pro/Max サブスクの OAuth トークン
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # 手動実行のときは入力 prompt をそのまま渡す
+          prompt: ${{ github.event_name == 'workflow_dispatch' && inputs.prompt || '' }}
